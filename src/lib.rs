@@ -939,11 +939,52 @@ fn start_window_geometry_writer(
 const TRAY_LABEL_COLOR: [u8; 4] = [245, 246, 248, 255];
 const TRAY_NEUTRAL_COLOR: [u8; 4] = [105, 107, 116, 255];
 
-fn tray_percent_text(remaining: Option<f64>, is_fresh: bool) -> String {
-    match remaining.filter(|value| is_fresh && value.is_finite()) {
-        Some(value) => format!("{}%", value.clamp(0.0, 100.0).round() as u32),
+#[derive(Clone, Copy)]
+struct TrayPercentage {
+    value: f64,
+    rounded: u32,
+}
+
+fn tray_percentage_from_decimal(value: &str) -> Option<TrayPercentage> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.contains('.') && fraction.is_empty())
+    {
+        return None;
+    }
+
+    let whole = whole.parse::<u32>().ok()?;
+    let percent = value.parse::<f64>().ok()?;
+    if !percent.is_finite() || !(0.0..=100.0).contains(&percent) || whole > 100 {
+        return None;
+    }
+
+    let round_up = fraction
+        .as_bytes()
+        .first()
+        .is_some_and(|digit| *digit >= b'5');
+    Some(TrayPercentage {
+        value: percent,
+        rounded: (whole + u32::from(round_up)).min(100),
+    })
+}
+
+fn tray_percent_text(remaining: Option<TrayPercentage>, is_fresh: bool) -> String {
+    match remaining.filter(|_| is_fresh) {
+        Some(value) => format!("{}%", value.rounded),
         None => "—".to_owned(),
     }
+}
+
+fn tray_remaining_percent(
+    window: Option<&protocol::UsageWindow>,
+    is_fresh: bool,
+) -> Option<TrayPercentage> {
+    window
+        .filter(|_| is_fresh)
+        .and_then(|window| tray_percentage_from_decimal(&window.remaining_percent))
 }
 
 fn tray_glyph(character: char, compact_width: bool) -> [u8; 7] {
@@ -1036,7 +1077,7 @@ fn draw_tray_text(rgba: &mut [u8], text: &str, y: u32, color: [u8; 4]) {
 
 fn tray_icon_pixels(
     is_weekly: bool,
-    remaining: Option<f64>,
+    remaining: Option<TrayPercentage>,
     is_fresh: bool,
     threshold: f64,
 ) -> Vec<u8> {
@@ -1044,9 +1085,9 @@ fn tray_icon_pixels(
     let label = if is_weekly { "7D" } else { "5H" };
     let percentage = tray_percent_text(remaining, is_fresh);
     let label_color = TRAY_LABEL_COLOR;
-    let value_color = match remaining.filter(|value| is_fresh && value.is_finite()) {
+    let value_color = match remaining.filter(|_| is_fresh) {
         Some(value) => {
-            let color = presentation::palette(value.clamp(0.0, 100.0), threshold).mid;
+            let color = presentation::palette(value.value, threshold).mid;
             [color[0], color[1], color[2], 255]
         }
         None => TRAY_NEUTRAL_COLOR,
@@ -1058,7 +1099,7 @@ fn tray_icon_pixels(
 
 fn tray_icon(
     is_weekly: bool,
-    remaining: Option<f64>,
+    remaining: Option<TrayPercentage>,
     is_fresh: bool,
     threshold: f64,
 ) -> tauri::image::Image<'static> {
@@ -1201,9 +1242,7 @@ pub(crate) fn update_tray_indicators(app: &AppHandle, state: &UsageState) {
             ("five-hour", false, snapshot.five_hour.as_ref()),
             ("weekly", true, snapshot.weekly.as_ref()),
         ] {
-            let remaining = window
-                .filter(|_| is_fresh)
-                .map(|window| window.remaining_fraction * 100.0);
+            let remaining = tray_remaining_percent(window, is_fresh);
             if let Some(icon) = indicator_app.tray_by_id(id) {
                 let _ = icon.set_icon(Some(tray_icon(
                     is_weekly,
@@ -1392,6 +1431,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tray_percentage_for_test(value: f64) -> Option<TrayPercentage> {
+        tray_percentage_from_decimal(&value.to_string())
+    }
 
     #[test]
     fn app_version_is_exposed_to_the_main_window() {
@@ -1727,28 +1770,68 @@ mod tests {
     #[test]
     fn tray_percent_text_rounds_clamps_and_omits_stale_values() {
         for remaining in 0..=100 {
+            let value = remaining.to_string();
             assert_eq!(
-                tray_percent_text(Some(f64::from(remaining)), true),
+                tray_percent_text(tray_percentage_from_decimal(&value), true),
                 format!("{remaining}%")
             );
         }
         for (remaining, expected) in [
-            (Some(0.0), "0%"),
-            (Some(0.4), "0%"),
-            (Some(0.5), "1%"),
-            (Some(19.49), "19%"),
-            (Some(19.5), "20%"),
-            (Some(99.9), "100%"),
-            (Some(100.0), "100%"),
-            (Some(101.0), "100%"),
-            (Some(-1.0), "0%"),
+            ("0", "0%"),
+            ("0.4", "0%"),
+            ("0.5", "1%"),
+            ("19.49", "19%"),
+            ("19.5", "20%"),
+            ("99.9", "100%"),
+            ("100", "100%"),
+            ("100.0", "100%"),
         ] {
+            assert_eq!(
+                tray_percent_text(tray_percentage_from_decimal(remaining), true),
+                expected
+            );
+        }
+        assert!(tray_percentage_from_decimal("101").is_none());
+        assert!(tray_percentage_from_decimal("-1").is_none());
+        assert!(tray_percentage_from_decimal("NaN").is_none());
+        assert_eq!(tray_percent_text(None, true), "—");
+        assert_eq!(
+            tray_percent_text(tray_percentage_from_decimal("61"), false),
+            "—"
+        );
+    }
+
+    #[test]
+    fn tray_rounding_preserves_half_percent_values_from_codex() {
+        for (used_percent, expected) in [(85.5, "15%"), (71.5, "29%"), (43.5, "57%"), (42.5, "58%")]
+        {
+            let windows = protocol::parse_rate_limits(&serde_json::json!({
+                "rateLimits": {
+                    "primary": {
+                        "usedPercent": used_percent,
+                        "windowDurationMins": protocol::FIVE_HOUR_WINDOW_MINS,
+                        "resetsAt": 1_800_000_000
+                    }
+                }
+            }))
+            .unwrap();
+            assert!(tray_remaining_percent(windows.five_hour.as_ref(), false).is_none());
+            let remaining = tray_remaining_percent(windows.five_hour.as_ref(), true);
             assert_eq!(tray_percent_text(remaining, true), expected);
         }
-        assert_eq!(tray_percent_text(None, true), "—");
-        assert_eq!(tray_percent_text(Some(61.0), false), "—");
-        assert_eq!(tray_percent_text(Some(f64::NAN), true), "—");
-        assert_eq!(tray_percent_text(Some(f64::INFINITY), true), "—");
+    }
+
+    #[test]
+    fn tray_rounding_uses_exact_decimal_digits_near_half_percent() {
+        let payload = serde_json::from_str(
+            r#"{"rateLimits":{"primary":{"usedPercent":85.5000000000000001,"windowDurationMins":300,"resetsAt":1800000000}}}"#,
+        )
+        .unwrap();
+        let windows = protocol::parse_rate_limits(&payload).unwrap();
+        let window = windows.five_hour.unwrap();
+        assert_eq!(window.remaining_percent, "14.4999999999999999");
+        let remaining = tray_remaining_percent(Some(&window), true);
+        assert_eq!(tray_percent_text(remaining, true), "14%");
     }
 
     #[test]
@@ -1761,7 +1844,12 @@ mod tests {
                 threshold + 5.0,
                 threshold + 5.01,
             ]) {
-                let rgba = tray_icon_pixels(is_weekly, Some(remaining), true, threshold);
+                let rgba = tray_icon_pixels(
+                    is_weekly,
+                    tray_percentage_for_test(remaining),
+                    true,
+                    threshold,
+                );
                 let expected = presentation::palette(remaining, threshold).mid;
                 assert!(rgba
                     .chunks_exact(4)
@@ -1770,6 +1858,7 @@ mod tests {
             }
         }
         for (remaining, is_fresh) in [(None, true), (Some(61.0), false), (Some(f64::NAN), true)] {
+            let remaining = remaining.and_then(tray_percentage_for_test);
             let rgba = tray_icon_pixels(false, remaining, is_fresh, 20.0);
             assert!(rgba
                 .chunks_exact(4)
@@ -1785,7 +1874,7 @@ mod tests {
 
     #[test]
     fn tray_icons_stack_period_and_larger_colored_value_without_separator() {
-        let rgba = tray_icon_pixels(false, Some(8.0), true, 20.0);
+        let rgba = tray_icon_pixels(false, tray_percentage_for_test(8.0), true, 20.0);
         assert!((0..10).any(|y| {
             (0..32).any(|x| {
                 let index = ((y * 32 + x) * 4) as usize;
@@ -1823,7 +1912,7 @@ mod tests {
 
     #[test]
     fn tray_percentage_sign_has_a_clear_gap_after_the_number() {
-        let rgba = tray_icon_pixels(false, Some(73.0), true, 20.0);
+        let rgba = tray_icon_pixels(false, tray_percentage_for_test(73.0), true, 20.0);
         for y in 16..30 {
             for x in 18..24 {
                 let index = ((y * 32 + x) * 4) as usize;
@@ -1835,6 +1924,7 @@ mod tests {
     #[test]
     fn tray_percentages_are_centered_and_spaced_from_the_period_label() {
         for remaining in [Some(8.0), Some(27.0), Some(100.0), None] {
+            let remaining = remaining.and_then(tray_percentage_for_test);
             let rgba = tray_icon_pixels(false, remaining, true, 20.0);
             for y in 14..16 {
                 assert!((0..32).all(|x| {
@@ -1857,7 +1947,7 @@ mod tests {
     #[test]
     fn tray_icon_text_fits_and_centers_the_full_100_percent_value() {
         for is_weekly in [false, true] {
-            let rgba = tray_icon_pixels(is_weekly, Some(100.0), true, 20.0);
+            let rgba = tray_icon_pixels(is_weekly, tray_percentage_for_test(100.0), true, 20.0);
             assert_eq!(rgba.len(), 32 * 32 * 4);
             let occupied_x: Vec<u32> = rgba
                 .chunks_exact(4)
@@ -1877,6 +1967,7 @@ mod tests {
     #[test]
     fn tray_icon_uses_a_wider_font_for_values_that_leave_room() {
         for (remaining, expected_width) in [(Some(8.0), 20), (Some(99.0), 32), (Some(100.0), 32)] {
+            let remaining = remaining.and_then(tray_percentage_for_test);
             let text = tray_percent_text(remaining, true);
             let compact_width = text == "100%";
             assert_eq!(tray_text_width(&text, compact_width), expected_width);
@@ -1892,14 +1983,15 @@ mod tests {
         }
 
         for remaining in 0..=100 {
-            let text = tray_percent_text(Some(f64::from(remaining)), true);
+            let remaining = tray_percentage_for_test(f64::from(remaining));
+            let text = tray_percent_text(remaining, true);
             assert!(tray_text_width(&text, text == "100%") <= 32);
         }
     }
 
     #[test]
     fn tray_icon_pixels_align_to_the_native_16px_grid() {
-        let rgba = tray_icon_pixels(false, Some(100.0), true, 20.0);
+        let rgba = tray_icon_pixels(false, tray_percentage_for_test(100.0), true, 20.0);
         for y in (0..32).step_by(2) {
             for x in (0..32).step_by(2) {
                 let pixel = ((y * 32 + x) * 4) as usize;
