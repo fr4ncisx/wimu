@@ -1,7 +1,6 @@
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-pub const SUPPORTED_CLI_VERSION: &str = "codex-cli 0.162.1";
 pub const FIVE_HOUR_WINDOW_MINS: u32 = 300;
 pub const WEEKLY_WINDOW_MINS: u32 = 10_080;
 
@@ -186,10 +185,6 @@ fn subtract_from_100(value: &str) -> Option<String> {
     Some(digits)
 }
 
-pub fn cli_version_matches(stdout: &[u8]) -> bool {
-    String::from_utf8_lossy(stdout).trim() == SUPPORTED_CLI_VERSION
-}
-
 pub fn rpc_id(message: &Value) -> Option<u64> {
     message.get("id")?.as_u64()
 }
@@ -286,12 +281,5 @@ mod tests {
         let windows = parse_rate_limits(&payload).unwrap();
         assert!(windows.five_hour.is_none());
         assert!(windows.weekly.is_none());
-    }
-
-    #[test]
-    fn accepts_only_the_pinned_cli_build() {
-        assert!(cli_version_matches(b"codex-cli 0.162.1\n"));
-        assert!(!cli_version_matches(b"codex-cli 0.162.0-alpha.17.2\n"));
-        assert!(!cli_version_matches(b"codex-cli 0.163.0\n"));
     }
 }

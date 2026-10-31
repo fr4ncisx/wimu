@@ -52,7 +52,7 @@ A compact Windows panel for Codex CLI's five-hour and weekly usage windows.
 ### To run
 
 - Windows 10+ with WebView2 Runtime.
-- Codex CLI `0.162.1`, discoverable on `PATH` or in its standard npm installation under `%APPDATA%`.
+- Codex CLI compatible with WIMU's `app-server` protocol, discoverable on `PATH` or in its standard npm installation under `%APPDATA%`. Verified with Codex CLI `0.162.1` and `0.166.0`.
 - Codex CLI already signed in under the same Windows account.
 
 ### To build
@@ -105,7 +105,7 @@ These tools are only needed for frontend UI tests; they are not required to buil
 
 ## How updates work
 
-WIMU reads limits from the compatible Codex CLI over local standard input and output. It applies limit-change events as they arrive and reconciles the values every 15 seconds while connected. If a connection is lost, the panel marks the data stale and reconnects. Event delivery has no documented maximum latency.
+WIMU reads limits from Codex CLI over local standard input and output and validates the `app-server` protocol instead of requiring an exact CLI version. It applies limit-change events as they arrive and reconciles the values every 15 seconds while connected. If a connection is lost, the panel marks the data stale and reconnects. Event delivery has no documented maximum latency.
 
 The app identifies the five-hour and weekly windows from their durations and uses the percentage and reset time returned by Codex. It preserves the source percentage precision and does not estimate a missing window. If Codex CLI is missing, install it and restart WIMU.
 
@@ -115,8 +115,8 @@ The app identifies the five-hour and weekly windows from their durations and use
 
 | Problem | What to do |
 |---|---|
-| Codex CLI is not found | Add `codex.exe` to `PATH` or install the supported npm package, then restart the app. |
-| Codex CLI version is unsupported | Install version `0.162.1` and restart WIMU. |
+| Codex CLI is not found | Add `codex.exe` to `PATH` or install the Codex CLI npm package, then restart the app. |
+| WIMU cannot read the Codex CLI protocol | Update WIMU and/or Codex CLI, then restart the app. |
 | No usage is available | Sign in through Codex CLI under the same Windows account, then restart the app. |
 | Data is stale | Restore Codex CLI availability; the app reconnects when the connection returns. |
 | A usage window is unavailable | Check that Codex returned that period. The app does not estimate missing data. |

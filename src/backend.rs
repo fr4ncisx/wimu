@@ -1,6 +1,5 @@
 use crate::protocol::{
-    cli_version_matches, parse_rate_limits, rate_limits_read_result, rpc_error_code, rpc_id,
-    UsageWindows, SUPPORTED_CLI_VERSION,
+    parse_rate_limits, rate_limits_read_result, rpc_error_code, rpc_id, UsageWindows,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -97,6 +96,21 @@ pub fn request_backend_shutdown(commands: &Sender<BackendCommand>) {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum CliAvailability {
+    Ready,
+    Missing,
+    CheckFailed,
+}
+
+fn classify_cli_check(result: io::Result<Vec<u8>>) -> CliAvailability {
+    match result {
+        Ok(_) => CliAvailability::Ready,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => CliAvailability::Missing,
+        Err(_) => CliAvailability::CheckFailed,
+    }
+}
+
 fn supervise(app: AppHandle, commands: Receiver<BackendCommand>, state: Arc<Mutex<UsageState>>) {
     publish(&app, &state);
     let cli = match CliCommand::discover() {
@@ -112,9 +126,9 @@ fn supervise(app: AppHandle, commands: Receiver<BackendCommand>, state: Arc<Mute
         }
     };
 
-    let version = match cli.version() {
-        Ok(version) => version,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    match classify_cli_check(cli.version()) {
+        CliAvailability::Ready => {}
+        CliAvailability::Missing => {
             update_status(
                 &app,
                 &state,
@@ -123,7 +137,7 @@ fn supervise(app: AppHandle, commands: Receiver<BackendCommand>, state: Arc<Mute
             );
             return;
         }
-        Err(_) => {
+        CliAvailability::CheckFailed => {
             update_status(
                 &app,
                 &state,
@@ -132,16 +146,6 @@ fn supervise(app: AppHandle, commands: Receiver<BackendCommand>, state: Arc<Mute
             );
             return;
         }
-    };
-    if !cli_version_matches(&version) {
-        let installed = String::from_utf8_lossy(&version).trim().to_owned();
-        update_status(
-            &app,
-            &state,
-            "incompatible",
-            &format!("Se requiere {SUPPORTED_CLI_VERSION}; se encontró {installed}."),
-        );
-        return;
     }
 
     let mut retry_seconds = 1u64;
@@ -813,6 +817,40 @@ fn terminate_child(child: &mut Child) {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn newer_cli_versions_are_not_blocked() {
+        assert_eq!(
+            classify_cli_check(Ok(b"codex-cli 0.166.0\n".to_vec())),
+            CliAvailability::Ready
+        );
+    }
+
+    #[test]
+    fn cli_check_content_does_not_decide_compatibility() {
+        assert_eq!(
+            classify_cli_check(Ok(b"unexpected output".to_vec())),
+            CliAvailability::Ready
+        );
+    }
+
+    #[test]
+    fn cli_check_distinguishes_missing_from_other_failures() {
+        assert_eq!(
+            classify_cli_check(Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "missing"
+            ))),
+            CliAvailability::Missing
+        );
+        assert_eq!(
+            classify_cli_check(Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied"
+            ))),
+            CliAvailability::CheckFailed
+        );
+    }
 
     #[test]
     fn reconnect_backoff_is_capped() {

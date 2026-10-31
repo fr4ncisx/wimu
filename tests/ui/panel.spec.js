@@ -1165,7 +1165,7 @@ test("shows useful messages for sign-in, missing CLI, and incompatible CLI state
     ["needsLogin", "Sign in to Codex to view your limits."],
     ["cliMissing", "Codex CLI not found. Install it and restart the app."],
     ["cliCheckFailed", "Could not check Codex CLI. Restart the app."],
-    ["incompatible", "Update Codex CLI to a compatible version."],
+    ["incompatible", "This WIMU build can't read your Codex CLI. Update WIMU or Codex CLI and restart."],
   ];
   for (const [status, message] of states) {
     await page.evaluate((value) => window.__mockEmitUsage({
