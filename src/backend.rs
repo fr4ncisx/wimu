@@ -2,9 +2,9 @@ use crate::protocol::{parse_rate_limits, rate_limits_read_result, rpc_id, UsageW
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -95,56 +95,70 @@ pub fn request_backend_shutdown(commands: &Sender<BackendCommand>) {
 }
 
 #[derive(Debug, PartialEq)]
-enum CliAvailability {
-    Ready,
+enum CliCheckFailure {
     Missing,
     CheckFailed,
 }
 
-fn classify_cli_check(result: io::Result<Vec<u8>>) -> CliAvailability {
+fn classify_cli_check(result: io::Result<Vec<u8>>) -> Result<(), CliCheckFailure> {
     match result {
-        Ok(_) => CliAvailability::Ready,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => CliAvailability::Missing,
-        Err(_) => CliAvailability::CheckFailed,
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(CliCheckFailure::Missing),
+        Err(_) => Err(CliCheckFailure::CheckFailed),
+    }
+}
+
+fn resolve_cli(
+    mut discover: impl FnMut() -> Result<CliCommand, CliCheckFailure>,
+    mut on_failure: impl FnMut(CliCheckFailure),
+    mut wait: impl FnMut(u64) -> bool,
+) -> Option<CliCommand> {
+    let mut retry_seconds = 1u64;
+    loop {
+        match discover() {
+            Ok(cli) => return Some(cli),
+            Err(failure @ CliCheckFailure::Missing) => {
+                on_failure(failure);
+                return None;
+            }
+            Err(failure) => {
+                on_failure(failure);
+                if wait(retry_seconds) {
+                    return None;
+                }
+                retry_seconds = next_backoff(retry_seconds);
+            }
+        }
+    }
+}
+
+fn report_cli_failure(app: &AppHandle, state: &Arc<Mutex<UsageState>>, failure: CliCheckFailure) {
+    match failure {
+        CliCheckFailure::Missing => update_status(
+            app,
+            state,
+            "cliMissing",
+            "No se encontró Codex CLI. Instalalo y reiniciá la aplicación para consultar los límites.",
+        ),
+        CliCheckFailure::CheckFailed => update_status(
+            app,
+            state,
+            "cliCheckFailed",
+            "No se pudo comprobar Codex CLI. WIMU reintentará automáticamente.",
+        ),
     }
 }
 
 fn supervise(app: AppHandle, commands: Receiver<BackendCommand>, state: Arc<Mutex<UsageState>>) {
     publish(&app, &state);
-    let cli = match CliCommand::discover() {
-        Ok(cli) => cli,
-        Err(_) => {
-            update_status(
-                &app,
-                &state,
-                "cliMissing",
-                "No se encontró Codex CLI. Instalalo y reiniciá la aplicación para consultar los límites.",
-            );
-            return;
-        }
+    let cli = match resolve_cli(
+        CliCommand::discover,
+        |failure| report_cli_failure(&app, &state, failure),
+        |seconds| wait_before_retry(&commands, seconds),
+    ) {
+        Some(cli) => cli,
+        None => return,
     };
-
-    match classify_cli_check(cli.version()) {
-        CliAvailability::Ready => {}
-        CliAvailability::Missing => {
-            update_status(
-                &app,
-                &state,
-                "cliMissing",
-                "No se encontró Codex CLI. Instalalo y reiniciá la aplicación para consultar los límites.",
-            );
-            return;
-        }
-        CliAvailability::CheckFailed => {
-            update_status(
-                &app,
-                &state,
-                "cliCheckFailed",
-                "No se pudo comprobar la versión de Codex CLI. Revisá la instalación y reiniciá la aplicación.",
-            );
-            return;
-        }
-    }
 
     let mut retry_seconds = 1u64;
     loop {
@@ -389,42 +403,76 @@ fn epoch_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+fn cli_candidates(path: Option<&OsStr>, app_data: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = path
+        .map(env::split_paths)
+        .into_iter()
+        .flatten()
+        .map(|directory| directory.join("codex.exe"))
+        .collect();
+
+    if let Some(app_data) = app_data {
+        let npm_root = PathBuf::from(app_data).join("npm").join("node_modules");
+        let platform_package = PathBuf::from("@openai").join("codex-win32-x64");
+        candidates.push(npm_vendor_binary(
+            &npm_root
+                .join("@openai")
+                .join("codex")
+                .join("node_modules")
+                .join(&platform_package),
+        ));
+        candidates.push(npm_vendor_binary(&npm_root.join(platform_package)));
+    }
+
+    candidates
+}
+
+fn npm_vendor_binary(package_root: &Path) -> PathBuf {
+    package_root
+        .join("vendor")
+        .join("x86_64-pc-windows-msvc")
+        .join("bin")
+        .join("codex.exe")
+}
+
+fn select_cli(
+    candidates: &[PathBuf],
+    mut probe: impl FnMut(&Path) -> io::Result<Vec<u8>>,
+) -> Result<CliCommand, CliCheckFailure> {
+    let mut failure = CliCheckFailure::Missing;
+    for candidate in candidates {
+        match classify_cli_check(probe(candidate)) {
+            Ok(()) => {
+                return Ok(CliCommand {
+                    program: candidate.clone().into_os_string(),
+                })
+            }
+            Err(CliCheckFailure::CheckFailed) => failure = CliCheckFailure::CheckFailed,
+            Err(CliCheckFailure::Missing) => {}
+        }
+    }
+    Err(failure)
+}
+
+fn probe_cli(program: &Path) -> io::Result<Vec<u8>> {
+    CliCommand {
+        program: program.as_os_str().to_owned(),
+    }
+    .version()
+}
+
 #[derive(Clone, Debug)]
 struct CliCommand {
     program: OsString,
 }
 
 impl CliCommand {
-    fn discover() -> io::Result<Self> {
-        if let Some(app_data) = env::var_os("APPDATA") {
-            let app_data = PathBuf::from(app_data);
-            let npm_root = app_data.join("npm").join("node_modules");
-            let platform_package = PathBuf::from("@openai").join("codex-win32-x64");
-            let candidates = [
-                npm_root
-                    .join("@openai")
-                    .join("codex")
-                    .join("node_modules")
-                    .join(&platform_package),
-                npm_root.join(platform_package),
-            ];
-            for package_root in candidates {
-                let executable = package_root
-                    .join("vendor")
-                    .join("x86_64-pc-windows-msvc")
-                    .join("bin")
-                    .join("codex.exe");
-                if executable.is_file() {
-                    return Ok(Self {
-                        program: executable.into_os_string(),
-                    });
-                }
-            }
-        }
-
-        Ok(Self {
-            program: "codex.exe".into(),
-        })
+    fn discover() -> Result<Self, CliCheckFailure> {
+        let candidates = cli_candidates(
+            env::var_os("PATH").as_deref(),
+            env::var_os("APPDATA").as_deref(),
+        );
+        select_cli(&candidates, probe_cli)
     }
 
     fn command(&self) -> Command {
@@ -854,7 +902,7 @@ mod tests {
     fn newer_cli_versions_are_not_blocked() {
         assert_eq!(
             classify_cli_check(Ok(b"codex-cli 0.166.0\n".to_vec())),
-            CliAvailability::Ready
+            Ok(())
         );
     }
 
@@ -862,7 +910,7 @@ mod tests {
     fn cli_check_content_does_not_decide_compatibility() {
         assert_eq!(
             classify_cli_check(Ok(b"unexpected output".to_vec())),
-            CliAvailability::Ready
+            Ok(())
         );
     }
 
@@ -873,15 +921,143 @@ mod tests {
                 std::io::ErrorKind::NotFound,
                 "missing"
             ))),
-            CliAvailability::Missing
+            Err(CliCheckFailure::Missing)
         );
         assert_eq!(
             classify_cli_check(Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "denied"
             ))),
-            CliAvailability::CheckFailed
+            Err(CliCheckFailure::CheckFailed)
         );
+    }
+
+    #[test]
+    fn cli_candidates_prefer_path_before_npm_fallback() {
+        let tools = PathBuf::from("tools");
+        let app_data = PathBuf::from("appdata");
+        let path = env::join_paths([&tools]).unwrap();
+
+        let candidates = cli_candidates(Some(&path), Some(app_data.as_os_str()));
+
+        assert_eq!(candidates.first(), Some(&tools.join("codex.exe")));
+        assert!(
+            candidates
+                .iter()
+                .skip(1)
+                .all(|candidate| candidate.starts_with(app_data.join("npm"))),
+            "npm fallbacks must come after every PATH candidate: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_npm_when_path_codex_fails() {
+        let candidates = vec![
+            PathBuf::from("path-codex.exe"),
+            PathBuf::from("npm-codex.exe"),
+        ];
+        let mut probed = Vec::new();
+
+        let selected = select_cli(&candidates, |candidate| {
+            probed.push(candidate.to_path_buf());
+            if candidate.ends_with("path-codex.exe") {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "locked"))
+            } else {
+                Ok(b"codex-cli 0.166.0".to_vec())
+            }
+        });
+
+        assert_eq!(
+            selected.map(|cli| cli.program),
+            Ok(OsString::from("npm-codex.exe"))
+        );
+        assert_eq!(probed, candidates);
+    }
+
+    #[test]
+    fn reports_a_missing_cli_when_no_candidate_runs() {
+        let candidates = vec![PathBuf::from("path-codex.exe")];
+
+        let selected = select_cli(&candidates, |_| {
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing"))
+        });
+
+        assert_eq!(
+            selected.map(|cli| cli.program),
+            Err(CliCheckFailure::Missing)
+        );
+    }
+
+    #[test]
+    fn a_failed_candidate_wins_over_missing_ones() {
+        let candidates = vec![PathBuf::from("locked.exe"), PathBuf::from("missing.exe")];
+
+        let selected = select_cli(&candidates, |candidate| {
+            if candidate.ends_with("locked.exe") {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "locked"))
+            } else {
+                Err(io::Error::new(io::ErrorKind::NotFound, "missing"))
+            }
+        });
+
+        assert_eq!(
+            selected.map(|cli| cli.program),
+            Err(CliCheckFailure::CheckFailed)
+        );
+    }
+
+    #[test]
+    fn transient_cli_check_failures_are_retried_with_backoff() {
+        let mut attempts = 0;
+        let mut waits = Vec::new();
+
+        let cli = resolve_cli(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(CliCheckFailure::CheckFailed)
+                } else {
+                    Ok(CliCommand {
+                        program: OsString::from("codex.exe"),
+                    })
+                }
+            },
+            |_| {},
+            |seconds| {
+                waits.push(seconds);
+                false
+            },
+        );
+
+        assert_eq!(
+            cli.map(|cli| cli.program),
+            Some(OsString::from("codex.exe"))
+        );
+        assert_eq!(waits, vec![1, 2]);
+    }
+
+    #[test]
+    fn a_missing_cli_stops_without_retrying() {
+        let mut waits = Vec::new();
+
+        let cli = resolve_cli(
+            || Err(CliCheckFailure::Missing),
+            |_| {},
+            |seconds| {
+                waits.push(seconds);
+                false
+            },
+        );
+
+        assert!(cli.is_none());
+        assert!(waits.is_empty());
+    }
+
+    #[test]
+    fn cli_retry_stops_when_shutdown_is_requested() {
+        let cli = resolve_cli(|| Err(CliCheckFailure::CheckFailed), |_| {}, |_| true);
+
+        assert!(cli.is_none());
     }
 
     #[test]
