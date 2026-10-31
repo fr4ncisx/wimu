@@ -609,6 +609,18 @@ struct PendingRead {
     started_at: Instant,
 }
 
+#[cfg(test)]
+fn coalesce_read(
+    pending: &mut Option<PendingRead>,
+    perform_read: impl FnOnce() -> io::Result<PendingRead>,
+) -> io::Result<bool> {
+    if pending.is_some() {
+        return Ok(false);
+    }
+    *pending = Some(perform_read()?);
+    Ok(true)
+}
+
 struct Connection {
     child: Child,
     stdin: BufWriter<ChildStdin>,
@@ -627,14 +639,17 @@ impl Connection {
         self.stdin.flush()
     }
 
-    fn request_read(&mut self) -> io::Result<()> {
+    fn request_read(&mut self) -> io::Result<bool> {
+        if self.pending_read.is_some() {
+            return Ok(false);
+        }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         let started_at = Instant::now();
         self.send(&json!({ "method": "account/rateLimits/read", "id": id }))?;
         self.pending_read = Some(PendingRead { id, started_at });
         self.next_reconciliation_at = started_at + RATE_LIMITS_RECONCILIATION_INTERVAL;
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -642,6 +657,7 @@ fn should_reconcile_limits(pending_read: bool, due_at: Instant, now: Instant) ->
     !pending_read && now >= due_at
 }
 
+#[derive(Debug)]
 enum ConnectFailure {
     Unavailable,
     Incompatible(String),
@@ -1276,5 +1292,36 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn does_not_overwrite_pending_read_on_partial_notification() {
+        let started = Instant::now();
+        let mut pending = Some(PendingRead {
+            id: 1,
+            started_at: started,
+        });
+        let executed = coalesce_read(&mut pending, || {
+            Ok(PendingRead {
+                id: 2,
+                started_at: Instant::now(),
+            })
+        })
+        .unwrap();
+        assert!(!executed);
+        assert_eq!(pending.as_ref().unwrap().id, 1);
+        assert_eq!(pending.as_ref().unwrap().started_at, started);
+    }
+
+    #[test]
+    #[ignore]
+    fn real_cli_rate_limits_probe() {
+        let cli = CliCommand::discover().expect("codex CLI must be installed to run real probe");
+        let mut connection = cli.spawn_server().expect("app-server should spawn");
+        let (command_tx, command_rx) = mpsc::channel();
+        initialize(&mut connection, &command_rx).expect("initialize handshake should succeed");
+        assert!(connection.request_read().is_ok());
+        terminate_child(&mut connection.child);
+        drop(command_tx);
     }
 }

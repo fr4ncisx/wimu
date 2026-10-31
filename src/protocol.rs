@@ -27,9 +27,6 @@ impl UsageWindows {
     }
 }
 
-/// Reads either a full `account/rateLimits/read` result or an
-/// `account/rateLimits/updated` params object. It intentionally recognizes
-/// periods by duration, not by bucket name or primary/secondary position.
 pub fn parse_rate_limits(value: &Value) -> Option<UsageWindows> {
     let mut found_shape = false;
     let mut windows = UsageWindows::default();
@@ -38,9 +35,7 @@ pub fn parse_rate_limits(value: &Value) -> Option<UsageWindows> {
         found_shape = true;
         if !by_id_value.is_null() {
             let by_id = by_id_value.as_object()?;
-            for bucket in by_id.values() {
-                collect_bucket(bucket, &mut windows);
-            }
+            collect_by_id(by_id, &mut windows);
         }
     }
 
@@ -53,9 +48,7 @@ pub fn parse_rate_limits(value: &Value) -> Option<UsageWindows> {
             if let Some(by_id_value) = single.get("rateLimitsByLimitId") {
                 if !by_id_value.is_null() {
                     let by_id = by_id_value.as_object()?;
-                    for bucket in by_id.values() {
-                        collect_bucket(bucket, &mut windows);
-                    }
+                    collect_by_id(by_id, &mut windows);
                 }
             }
             if single.get("primary").is_some() || single.get("secondary").is_some() {
@@ -64,13 +57,23 @@ pub fn parse_rate_limits(value: &Value) -> Option<UsageWindows> {
         }
     }
 
-    // Notification payloads may include the bucket itself directly.
     if value.get("primary").is_some() || value.get("secondary").is_some() {
         found_shape = true;
         collect_bucket(value, &mut windows);
     }
 
     found_shape.then_some(windows)
+}
+
+fn collect_by_id(by_id: &Map<String, Value>, windows: &mut UsageWindows) {
+    for (id, bucket) in by_id {
+        if id != "codex" {
+            collect_bucket(bucket, windows);
+        }
+    }
+    if let Some(codex_bucket) = by_id.get("codex") {
+        collect_bucket(codex_bucket, windows);
+    }
 }
 
 fn collect_bucket(bucket: &Value, windows: &mut UsageWindows) {
@@ -277,5 +280,21 @@ mod tests {
         let windows = parse_rate_limits(&payload).unwrap();
         assert!(windows.five_hour.is_none());
         assert!(windows.weekly.is_none());
+    }
+
+    #[test]
+    fn prefers_codex_bucket_when_duplicate_durations() {
+        let payload = json!({
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "primary": { "usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1800000000 }
+                },
+                "other": {
+                    "primary": { "usedPercent": 90, "windowDurationMins": 300, "resetsAt": 1800000000 }
+                }
+            }
+        });
+        let windows = parse_rate_limits(&payload).unwrap();
+        assert_eq!(windows.five_hour.unwrap().used_percent, "10");
     }
 }
