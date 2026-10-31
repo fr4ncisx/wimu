@@ -29,12 +29,20 @@ impl UsageWindows {
 pub fn parse_rate_limits(value: &Value) -> Option<UsageWindows> {
     let mut found_shape = false;
     let mut windows = UsageWindows::default();
+    let ordinary_usage_allowed = value
+        .get("ordinaryUsageAllowed")
+        .or_else(|| {
+            value
+                .get("rateLimits")
+                .and_then(|r| r.get("ordinaryUsageAllowed"))
+        })
+        .and_then(Value::as_bool);
 
     if let Some(by_id_value) = value.get("rateLimitsByLimitId") {
         found_shape = true;
         if !by_id_value.is_null() {
             let by_id = by_id_value.as_object()?;
-            collect_by_id(by_id, &mut windows);
+            collect_by_id(by_id, &mut windows, ordinary_usage_allowed);
         }
     }
 
@@ -47,40 +55,48 @@ pub fn parse_rate_limits(value: &Value) -> Option<UsageWindows> {
             if let Some(by_id_value) = single.get("rateLimitsByLimitId") {
                 if !by_id_value.is_null() {
                     let by_id = by_id_value.as_object()?;
-                    collect_by_id(by_id, &mut windows);
+                    collect_by_id(by_id, &mut windows, ordinary_usage_allowed);
                 }
             }
             if single.get("primary").is_some() || single.get("secondary").is_some() {
-                collect_bucket(single, &mut windows);
+                collect_bucket(single, &mut windows, ordinary_usage_allowed);
             }
         }
     }
 
     if value.get("primary").is_some() || value.get("secondary").is_some() {
         found_shape = true;
-        collect_bucket(value, &mut windows);
+        collect_bucket(value, &mut windows, ordinary_usage_allowed);
     }
 
     found_shape.then_some(windows)
 }
 
-fn collect_by_id(by_id: &Map<String, Value>, windows: &mut UsageWindows) {
+fn collect_by_id(
+    by_id: &Map<String, Value>,
+    windows: &mut UsageWindows,
+    ordinary_usage_allowed: Option<bool>,
+) {
     for (id, bucket) in by_id {
         if id != "codex" {
-            collect_bucket(bucket, windows);
+            collect_bucket(bucket, windows, ordinary_usage_allowed);
         }
     }
     if let Some(codex_bucket) = by_id.get("codex") {
-        collect_bucket(codex_bucket, windows);
+        collect_bucket(codex_bucket, windows, ordinary_usage_allowed);
     }
 }
 
-fn collect_bucket(bucket: &Value, windows: &mut UsageWindows) {
+fn collect_bucket(
+    bucket: &Value,
+    windows: &mut UsageWindows,
+    ordinary_usage_allowed: Option<bool>,
+) {
     for key in ["primary", "secondary"] {
         let Some(window_value) = bucket.get(key).filter(|v| !v.is_null()) else {
             continue;
         };
-        let Some(window) = parse_window(window_value) else {
+        let Some(window) = parse_window(window_value, ordinary_usage_allowed) else {
             continue;
         };
         match window.window_duration_mins {
@@ -91,7 +107,7 @@ fn collect_bucket(bucket: &Value, windows: &mut UsageWindows) {
     }
 }
 
-fn parse_window(value: &Value) -> Option<UsageWindow> {
+fn parse_window(value: &Value, ordinary_usage_allowed: Option<bool>) -> Option<UsageWindow> {
     let object = value.as_object()?;
     let duration = object
         .get("windowDurationMins")?
@@ -100,7 +116,10 @@ fn parse_window(value: &Value) -> Option<UsageWindow> {
         .ok()?;
     let used_number = object.get("usedPercent")?.as_number()?;
     let used_raw = used_number.to_string();
-    let remaining = subtract_from_100(&used_raw)?;
+    let mut remaining = subtract_from_100(&used_raw)?;
+    if remaining == "0" && ordinary_usage_allowed == Some(true) {
+        remaining = "1".to_owned();
+    }
     let used_float = used_number.as_f64()?;
     if !used_float.is_finite() || !(0.0..=100.0).contains(&used_float) {
         return None;
@@ -291,5 +310,28 @@ mod tests {
         });
         let windows = parse_rate_limits(&payload).unwrap();
         assert_eq!(windows.five_hour.unwrap().used_percent, "10");
+    }
+
+    #[test]
+    fn ordinary_usage_allowed_preserves_active_quota_when_used_is_100() {
+        let active = json!({
+            "ordinaryUsageAllowed": true,
+            "rateLimits": {
+                "primary": { "usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1800000000 },
+                "secondary": { "usedPercent": 100, "windowDurationMins": 10080, "resetsAt": 1800600000 }
+            }
+        });
+        let windows = parse_rate_limits(&active).unwrap();
+        assert_eq!(windows.five_hour.unwrap().remaining_percent, "100");
+        assert_eq!(windows.weekly.unwrap().remaining_percent, "1");
+
+        let blocked = json!({
+            "ordinaryUsageAllowed": false,
+            "rateLimits": {
+                "secondary": { "usedPercent": 100, "windowDurationMins": 10080, "resetsAt": 1800600000 }
+            }
+        });
+        let windows_blocked = parse_rate_limits(&blocked).unwrap();
+        assert_eq!(windows_blocked.weekly.unwrap().remaining_percent, "0");
     }
 }

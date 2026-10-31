@@ -1006,9 +1006,13 @@ fn tray_percentage_from_decimal(value: &str) -> Option<TrayPercentage> {
         .as_bytes()
         .first()
         .is_some_and(|digit| *digit >= b'5');
+    let mut rounded = (whole + u32::from(round_up)).min(100);
+    if percent > 0.0 && rounded == 0 {
+        rounded = 1;
+    }
     Some(TrayPercentage {
         value: percent,
-        rounded: (whole + u32::from(round_up)).min(100),
+        rounded,
     })
 }
 
@@ -1825,7 +1829,10 @@ mod tests {
         }
         for (remaining, expected) in [
             ("0", "0%"),
-            ("0.4", "0%"),
+            ("0.0", "0%"),
+            ("0.1", "1%"),
+            ("0.4", "1%"),
+            ("0.49", "1%"),
             ("0.5", "1%"),
             ("19.49", "19%"),
             ("19.5", "20%"),
