@@ -189,10 +189,6 @@ pub fn rpc_id(message: &Value) -> Option<u64> {
     message.get("id")?.as_u64()
 }
 
-pub fn rpc_error_code(message: &Value) -> Option<i64> {
-    message.get("error")?.get("code")?.as_i64()
-}
-
 pub fn rate_limits_read_result(message: &Value) -> Option<&Map<String, Value>> {
     let result = message.get("result")?.as_object()?;
     let has_known_shape =

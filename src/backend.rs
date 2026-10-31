@@ -1,6 +1,4 @@
-use crate::protocol::{
-    parse_rate_limits, rate_limits_read_result, rpc_error_code, rpc_id, UsageWindows,
-};
+use crate::protocol::{parse_rate_limits, rate_limits_read_result, rpc_id, UsageWindows};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::env;
@@ -279,14 +277,32 @@ fn set_connecting_status(app: &AppHandle, state: &Arc<Mutex<UsageState>>) {
 enum ReadErrorDisposition {
     Incompatible,
     NeedsLogin,
+    Transient,
 }
 
-fn read_error_disposition(code: Option<i64>) -> ReadErrorDisposition {
-    if code == Some(-32601) {
+fn read_error_disposition(error: &Value) -> ReadErrorDisposition {
+    let code = error.get("code").and_then(Value::as_i64);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let auth_message = is_auth_message(message);
+    if matches!(code, Some(-32601 | -32602)) || (code == Some(-32600) && !auth_message) {
         ReadErrorDisposition::Incompatible
-    } else {
+    } else if matches!(code, Some(401 | 403)) || auth_message {
         ReadErrorDisposition::NeedsLogin
+    } else {
+        ReadErrorDisposition::Transient
     }
+}
+
+fn is_auth_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("authentication required") || message.contains("unauthorized")
+}
+
+fn initialize_error_is_incompatible(error: &Value) -> bool {
+    read_error_disposition(error) == ReadErrorDisposition::Incompatible
 }
 
 fn parse_server_line(line: &str) -> Result<Value, ()> {
@@ -614,10 +630,13 @@ fn initialize(
                 if rpc_id(&message) != Some(0) {
                     continue;
                 }
-                if rpc_error_code(&message).is_some() {
-                    return Err(ConnectFailure::Incompatible(
-                        "El protocolo de inicialización de Codex no es compatible.".into(),
-                    ));
+                if let Some(error) = message.get("error") {
+                    if initialize_error_is_incompatible(error) {
+                        return Err(ConnectFailure::Incompatible(
+                            "El protocolo de inicialización de Codex no es compatible.".into(),
+                        ));
+                    }
+                    return Err(ConnectFailure::Unavailable);
                 }
                 if !message.get("result").is_some_and(Value::is_object) {
                     return Err(ConnectFailure::Incompatible(
@@ -751,8 +770,8 @@ fn run_connected(
             let read_started_at = pending.started_at;
             connection.pending_read = None;
 
-            if rpc_error_code(&parsed).is_some() {
-                match read_error_disposition(rpc_error_code(&parsed)) {
+            if let Some(error) = parsed.get("error") {
+                match read_error_disposition(error) {
                     ReadErrorDisposition::Incompatible => {
                         return LoopResult::Incompatible(
                             "La CLI no admite account/rateLimits/read.".into(),
@@ -764,6 +783,7 @@ fn run_connected(
                         "needsLogin",
                         "No se pudieron leer los límites. Revisá tu sesión de Codex y volvé a intentar.",
                     ),
+                    ReadErrorDisposition::Transient => return LoopResult::Disconnected,
                 }
                 continue;
             }
@@ -978,15 +998,65 @@ mod tests {
     }
 
     #[test]
-    fn authentication_errors_are_generic_and_never_echo_server_payload() {
+    fn authentication_errors_are_classified_without_echoing_server_payload() {
+        let auth = serde_json::json!({
+            "code": -32600,
+            "message": "codex account authentication required to read rate limits"
+        });
         assert_eq!(
-            read_error_disposition(Some(401)),
+            read_error_disposition(&auth),
             ReadErrorDisposition::NeedsLogin
         );
+
+        let unauthorized = serde_json::json!({
+            "code": 401,
+            "message": "unauthorized"
+        });
         assert_eq!(
-            read_error_disposition(Some(-32601)),
-            ReadErrorDisposition::Incompatible
+            read_error_disposition(&unauthorized),
+            ReadErrorDisposition::NeedsLogin
         );
+    }
+
+    #[test]
+    fn protocol_shape_errors_are_incompatible() {
+        for code in [-32600, -32601, -32602] {
+            let error = serde_json::json!({ "code": code, "message": "unsupported" });
+            assert_eq!(
+                read_error_disposition(&error),
+                ReadErrorDisposition::Incompatible
+            );
+        }
+    }
+
+    #[test]
+    fn internal_and_unknown_rpc_errors_are_transient() {
+        for code in [-32603, -32000, -32099] {
+            let error = serde_json::json!({ "code": code, "message": "temporary failure" });
+            assert_eq!(
+                read_error_disposition(&error),
+                ReadErrorDisposition::Transient
+            );
+        }
+        let unknown = serde_json::json!({ "message": "no code" });
+        assert_eq!(
+            read_error_disposition(&unknown),
+            ReadErrorDisposition::Transient
+        );
+    }
+
+    #[test]
+    fn initialize_only_stops_on_protocol_shape_errors() {
+        let method_not_found = serde_json::json!({ "code": -32601, "message": "method not found" });
+        let internal = serde_json::json!({ "code": -32603, "message": "internal error" });
+        let auth = serde_json::json!({
+            "code": -32600,
+            "message": "authentication required"
+        });
+
+        assert!(initialize_error_is_incompatible(&method_not_found));
+        assert!(!initialize_error_is_incompatible(&internal));
+        assert!(!initialize_error_is_incompatible(&auth));
     }
 
     #[test]
