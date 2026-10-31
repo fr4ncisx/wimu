@@ -204,7 +204,7 @@ fn normalized_window_size(size: WindowSize, ultra_compact: bool) -> WindowSize {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CloseAction {
     Ask,
@@ -232,7 +232,7 @@ where
     })
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
     #[serde(rename = "threshold5h")]
@@ -481,18 +481,56 @@ fn decode_settings(value: serde_json::Value) -> Result<Settings, String> {
     Ok(settings)
 }
 
-fn try_read_settings_file(app: &AppHandle) -> Result<Settings, String> {
-    let path = settings_path(app).map_err(|_| "Could not load preferences".to_owned())?;
+#[derive(Debug, PartialEq)]
+enum SettingsLoadOutcome {
+    Loaded(Settings),
+    Missing(Settings),
+    RecoveredFromCorrupt(Settings),
+}
+
+impl SettingsLoadOutcome {
+    fn into_settings(self) -> Settings {
+        match self {
+            Self::Loaded(settings)
+            | Self::Missing(settings)
+            | Self::RecoveredFromCorrupt(settings) => settings,
+        }
+    }
+}
+
+fn corrupt_settings_backup_path(path: &std::path::Path) -> PathBuf {
+    let mut backup = path.as_os_str().to_owned();
+    backup.push(".corrupt");
+    PathBuf::from(backup)
+}
+
+fn load_settings_from_path(path: &std::path::Path) -> Result<SettingsLoadOutcome, String> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Settings::default())
+            return Ok(SettingsLoadOutcome::Missing(Settings::default()));
         }
         Err(_) => return Err("Could not load preferences".into()),
     };
-    decode_settings(
-        serde_json::from_str(&contents).map_err(|_| "Could not load preferences".to_owned())?,
-    )
+
+    let parsed = serde_json::from_str(&contents).map_err(|_| ());
+    let decoded = parsed.and_then(|val| decode_settings(val).map_err(|_| ()));
+
+    match decoded {
+        Ok(settings) => Ok(SettingsLoadOutcome::Loaded(settings)),
+        Err(_) => {
+            let backup_path = corrupt_settings_backup_path(path);
+            let _ = fs::rename(path, &backup_path);
+            let defaults = Settings::default();
+            let _ = write_settings_path(path, &defaults);
+            Ok(SettingsLoadOutcome::RecoveredFromCorrupt(defaults))
+        }
+    }
+}
+
+fn try_read_settings_file(app: &AppHandle) -> Result<Settings, String> {
+    let path = settings_path(app).map_err(|_| "Could not load preferences".to_owned())?;
+    load_settings_from_path(&path).map(SettingsLoadOutcome::into_settings)
 }
 
 fn write_settings_file(app: &AppHandle, settings: &Settings) -> Result<(), String> {
@@ -2096,5 +2134,79 @@ mod tests {
         assert!(should_show_panel(false, Duration::from_secs(5)));
         assert!(should_show_panel(false, Duration::from_secs(10)));
         assert!(should_show_panel(true, Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn backs_up_corrupt_settings_and_uses_defaults() {
+        let directory = std::env::temp_dir().join(format!(
+            "wimu-corrupt-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        fs::write(&path, b"{\"broken\": json").unwrap();
+        let outcome = load_settings_from_path(&path).unwrap();
+        assert_eq!(
+            outcome,
+            SettingsLoadOutcome::RecoveredFromCorrupt(Settings::default())
+        );
+        let backup_path = directory.join("settings.json.corrupt");
+        assert!(backup_path.exists());
+        assert_eq!(fs::read(&backup_path).unwrap(), b"{\"broken\": json");
+        let restored_content = fs::read_to_string(&path).unwrap();
+        let restored_settings: Settings = serde_json::from_str(&restored_content).unwrap();
+        assert_eq!(
+            restored_settings.threshold_5h,
+            Settings::default().threshold_5h
+        );
+        fs::remove_file(backup_path).unwrap();
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn keeps_valid_settings_unchanged() {
+        let directory = std::env::temp_dir().join(format!(
+            "wimu-valid-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        let mut original = Settings::default();
+        original.threshold_5h = 35.0;
+        write_settings_path(&path, &original).unwrap();
+        let outcome = load_settings_from_path(&path).unwrap();
+        assert_eq!(outcome, SettingsLoadOutcome::Loaded(original));
+        assert!(!directory.join("settings.json.corrupt").exists());
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn missing_file_uses_defaults_without_backup() {
+        let directory = std::env::temp_dir().join(format!(
+            "wimu-missing-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("settings.json");
+        let outcome = load_settings_from_path(&path).unwrap();
+        assert_eq!(outcome, SettingsLoadOutcome::Missing(Settings::default()));
+        assert!(!path.exists());
+        assert!(!directory.join("settings.json.corrupt").exists());
+        if directory.exists() {
+            fs::remove_dir(directory).unwrap();
+        }
     }
 }
