@@ -3,9 +3,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,6 +14,71 @@ use tauri::{AppHandle, Emitter};
 
 const EVENT_NAME: &str = "usage-state";
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_STDERR_BYTES: usize = 16 * 1024;
+
+#[derive(Debug, Default, Clone)]
+pub struct BoundedStderr {
+    buffer: Vec<u8>,
+}
+
+impl BoundedStderr {
+    pub fn new() -> Self {
+        Self { buffer: Vec::new() }
+    }
+
+    pub fn push_bytes(&mut self, bytes: &[u8]) {
+        self.buffer.extend_from_slice(bytes);
+        if self.buffer.len() > MAX_STDERR_BYTES {
+            let excess = self.buffer.len() - MAX_STDERR_BYTES;
+            self.buffer.drain(..excess);
+        }
+    }
+
+    pub fn to_string_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.buffer).into_owned()
+    }
+
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+}
+
+pub fn redact_sensitive(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut words = input.split(' ').peekable();
+    let mut first = true;
+    while let Some(word) = words.next() {
+        if !first {
+            result.push(' ');
+        }
+        first = false;
+
+        if word.eq_ignore_ascii_case("bearer") {
+            result.push_str("Bearer");
+            if words.next().is_some() {
+                result.push_str(" [REDACTED]");
+            }
+        } else if word.starts_with("sk-") {
+            result.push_str("sk-[REDACTED]");
+        } else {
+            result.push_str(word);
+        }
+    }
+    result
+}
+
+pub fn format_diagnostic_message(context: &str, details: &str) -> String {
+    format!("[WIMU] {}: {}", context, redact_sensitive(details))
+}
+
+pub fn log_non_fatal_failure(context: &str, details: &str) {
+    eprintln!("{}", format_diagnostic_message(context, details));
+}
 const RPC_TIMEOUT: Duration = Duration::from_secs(12);
 const RATE_LIMITS_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -140,8 +205,14 @@ fn resolve_cli(
 
 fn report_cli_failure(app: &AppHandle, state: &Arc<Mutex<UsageState>>, failure: CliCheckFailure) {
     match failure {
-        CliCheckFailure::Missing => update_status(app, state, UsageStatus::CliMissing),
-        CliCheckFailure::CheckFailed => update_status(app, state, UsageStatus::CliCheckFailed),
+        CliCheckFailure::Missing => {
+            log_non_fatal_failure("cli-check", "Codex CLI missing");
+            update_status(app, state, UsageStatus::CliMissing);
+        }
+        CliCheckFailure::CheckFailed => {
+            log_non_fatal_failure("cli-check", "Codex CLI check failed");
+            update_status(app, state, UsageStatus::CliCheckFailed);
+        }
     }
 }
 
@@ -170,7 +241,8 @@ fn supervise(app: AppHandle, commands: Receiver<BackendCommand>, state: Arc<Mute
 
         let mut connection = match cli.spawn_server() {
             Ok(connection) => connection,
-            Err(_) => {
+            Err(error) => {
+                log_non_fatal_failure("cli-spawn", &error.to_string());
                 mark_disconnected(&app, &state);
                 if wait_before_retry(&commands, retry_seconds) {
                     break;
@@ -183,6 +255,11 @@ fn supervise(app: AppHandle, commands: Receiver<BackendCommand>, state: Arc<Mute
         match initialize(&mut connection, &commands) {
             Ok(()) => match run_connected(&app, &commands, &state, &mut connection) {
                 LoopResult::Incompatible(_message) => {
+                    if let Ok(buf) = connection.stderr.lock() {
+                        if !buf.is_empty() {
+                            log_non_fatal_failure("app-server-stderr", &buf.to_string_lossy());
+                        }
+                    }
                     update_status(&app, &state, UsageStatus::Incompatible);
                     terminate_child(&mut connection.child);
                     break;
@@ -193,17 +270,32 @@ fn supervise(app: AppHandle, commands: Receiver<BackendCommand>, state: Arc<Mute
                     break;
                 }
                 LoopResult::Disconnected => {
+                    if let Ok(buf) = connection.stderr.lock() {
+                        if !buf.is_empty() {
+                            log_non_fatal_failure("app-server-stderr", &buf.to_string_lossy());
+                        }
+                    }
                     mark_disconnected(&app, &state);
                     retry_seconds =
                         retry_delay_after_connection(retry_seconds, connection.had_successful_read);
                 }
             },
             Err(ConnectFailure::Incompatible(_message)) => {
+                if let Ok(buf) = connection.stderr.lock() {
+                    if !buf.is_empty() {
+                        log_non_fatal_failure("app-server-stderr", &buf.to_string_lossy());
+                    }
+                }
                 update_status(&app, &state, UsageStatus::Incompatible);
                 terminate_child(&mut connection.child);
                 break;
             }
             Err(ConnectFailure::Unavailable) => {
+                if let Ok(buf) = connection.stderr.lock() {
+                    if !buf.is_empty() {
+                        log_non_fatal_failure("app-server-stderr", &buf.to_string_lossy());
+                    }
+                }
                 mark_disconnected(&app, &state);
             }
             Err(ConnectFailure::Shutdown(ack)) => {
@@ -483,7 +575,7 @@ impl CliCommand {
             .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
         let stdin = child
             .stdin
@@ -493,20 +585,41 @@ impl CliCommand {
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("Codex app-server stdout unavailable"))?;
+        let stderr = child.stderr.take();
         let (server_tx, server_rx) = mpsc::channel();
         thread::Builder::new()
             .name("codex-app-server-stdout".into())
             .spawn(move || read_server_stdout(stdout, server_tx))?;
+        let stderr_buffer = Arc::new(Mutex::new(BoundedStderr::new()));
+        if let Some(stderr) = stderr {
+            let buffer = Arc::clone(&stderr_buffer);
+            let _ = thread::Builder::new()
+                .name("codex-app-server-stderr".into())
+                .spawn(move || read_server_stderr(stderr, buffer));
+        }
         Ok(Connection {
             child,
             stdin: BufWriter::new(stdin),
             server: server_rx,
+            stderr: stderr_buffer,
             next_id: 1,
             pending_read: None,
             last_notification_instant: None,
             next_reconciliation_at: Instant::now(),
             had_successful_read: false,
         })
+    }
+}
+
+fn read_server_stderr(mut stderr: ChildStderr, buffer: Arc<Mutex<BoundedStderr>>) {
+    let mut chunk = [0u8; 1024];
+    while let Ok(count) = stderr.read(&mut chunk) {
+        if count == 0 {
+            break;
+        }
+        if let Ok(mut lock) = buffer.lock() {
+            lock.push_bytes(&chunk[..count]);
+        }
     }
 }
 
@@ -603,6 +716,7 @@ struct Connection {
     child: Child,
     stdin: BufWriter<ChildStdin>,
     server: Receiver<ServerMessage>,
+    stderr: Arc<Mutex<BoundedStderr>>,
     next_id: u64,
     pending_read: Option<PendingRead>,
     last_notification_instant: Option<Instant>,
@@ -1271,5 +1385,39 @@ mod tests {
         assert!(connection.request_read().is_ok());
         terminate_child(&mut connection.child);
         drop(command_tx);
+    }
+
+    #[test]
+    fn bounded_stderr_caps_at_max_size_retaining_latest_output() {
+        let mut stderr = BoundedStderr::new();
+        let chunk = vec![b'a'; 10 * 1024];
+        stderr.push_bytes(&chunk);
+        assert_eq!(stderr.len(), 10 * 1024);
+
+        let second_chunk = vec![b'b'; 10 * 1024];
+        stderr.push_bytes(&second_chunk);
+        assert_eq!(stderr.len(), 16 * 1024);
+        assert!(stderr.to_string_lossy().ends_with(&"b".repeat(10 * 1024)));
+        assert!(stderr.to_string_lossy().starts_with(&"a".repeat(6 * 1024)));
+    }
+
+    #[test]
+    fn redact_sensitive_masks_bearer_tokens_and_api_keys() {
+        let raw = "Authorization: Bearer secret_token_12345 sk-proj1234567890abcdef";
+        let redacted = redact_sensitive(raw);
+        assert!(!redacted.contains("secret_token_12345"));
+        assert!(!redacted.contains("proj1234567890abcdef"));
+        assert!(redacted.contains("Bearer [REDACTED]"));
+        assert!(redacted.contains("sk-[REDACTED]"));
+    }
+
+    #[test]
+    fn non_fatal_failure_format_includes_context_and_redacts_details() {
+        let formatted =
+            format_diagnostic_message("cli-check", "Bearer xyz failed with sk-test1234");
+        assert_eq!(
+            formatted,
+            "[WIMU] cli-check: Bearer [REDACTED] failed with sk-[REDACTED]"
+        );
     }
 }
