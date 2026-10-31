@@ -2209,4 +2209,38 @@ mod tests {
             fs::remove_dir(directory).unwrap();
         }
     }
+
+    #[test]
+    fn shared_geometry_and_defaults_match_tauri_config_and_fixtures() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let window = config["app"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["label"] == "main")
+            .unwrap();
+
+        assert_eq!(window["width"], NORMAL_WINDOW_SIZE.0);
+        assert_eq!(window["height"], NORMAL_WINDOW_SIZE.1);
+        assert_eq!(window["minWidth"], NORMAL_WINDOW_MIN_SIZE.0);
+        assert_eq!(window["minHeight"], NORMAL_WINDOW_MIN_SIZE.1);
+        assert_eq!(window["maxHeight"], NORMAL_WINDOW_SIZE.1);
+
+        let defaults = Settings::default();
+        assert_eq!(defaults.threshold_5h, 20.0);
+        assert_eq!(defaults.threshold_weekly, 20.0);
+        assert!(defaults.always_on_top);
+        assert!(!defaults.sound_enabled);
+        assert_eq!(defaults.normal_window_size.width, NORMAL_WINDOW_SIZE.0);
+        assert_eq!(defaults.normal_window_size.height, NORMAL_WINDOW_SIZE.1);
+        assert_eq!(
+            defaults.ultra_compact_window_size.width,
+            ULTRA_COMPACT_WINDOW_SIZE.0
+        );
+        assert_eq!(
+            defaults.ultra_compact_window_size.height,
+            ULTRA_COMPACT_WINDOW_SIZE.1
+        );
+    }
 }

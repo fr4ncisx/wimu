@@ -1409,3 +1409,16 @@ test("shows panel when initialize rejects", async ({ page }) => {
   await page.waitForFunction(() => window.__mockPanelShown);
   await expect(page.locator(".app-shell")).toBeVisible();
 });
+
+test("shared fixtures and app settings match defaults", async ({ page }) => {
+  await installTauriMock(page, {});
+  const appSettings = await page.evaluate(() => window.__mockGetSettings());
+  expect(appSettings.threshold5h).toBe(20);
+  expect(appSettings.thresholdWeekly).toBe(20);
+  expect(appSettings.alwaysOnTop).toBe(true);
+  expect(appSettings.soundEnabled).toBe(false);
+  expect(appSettings.closeAction).toBe("ask");
+  expect(appSettings.ultraCompact).toBe(false);
+  expect(appSettings.normalWindowSize).toEqual({ width: 360, height: 220 });
+  expect(appSettings.ultraCompactWindowSize).toEqual({ width: 300, height: 156 });
+});
