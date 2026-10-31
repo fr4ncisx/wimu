@@ -171,22 +171,23 @@ fn supervise(app: AppHandle, commands: Receiver<BackendCommand>, state: Arc<Mute
         };
 
         match initialize(&mut connection, &commands) {
-            Ok(()) => {
-                retry_seconds = 1;
-                match run_connected(&app, &commands, &state, &mut connection) {
-                    LoopResult::Incompatible(message) => {
-                        update_status(&app, &state, "incompatible", &message);
-                        terminate_child(&mut connection.child);
-                        break;
-                    }
-                    LoopResult::Shutdown(ack) => {
-                        terminate_child(&mut connection.child);
-                        let _ = ack.send(());
-                        break;
-                    }
-                    LoopResult::Disconnected => mark_disconnected(&app, &state),
+            Ok(()) => match run_connected(&app, &commands, &state, &mut connection) {
+                LoopResult::Incompatible(message) => {
+                    update_status(&app, &state, "incompatible", &message);
+                    terminate_child(&mut connection.child);
+                    break;
                 }
-            }
+                LoopResult::Shutdown(ack) => {
+                    terminate_child(&mut connection.child);
+                    let _ = ack.send(());
+                    break;
+                }
+                LoopResult::Disconnected => {
+                    mark_disconnected(&app, &state);
+                    retry_seconds =
+                        retry_delay_after_connection(retry_seconds, connection.had_successful_read);
+                }
+            },
             Err(ConnectFailure::Incompatible(message)) => {
                 update_status(&app, &state, "incompatible", &message);
                 terminate_child(&mut connection.child);
@@ -217,6 +218,14 @@ fn next_backoff(current: u64) -> u64 {
         5..=9 => 10,
         10..=29 => 30,
         _ => 60,
+    }
+}
+
+fn retry_delay_after_connection(current: u64, had_successful_read: bool) -> u64 {
+    if had_successful_read {
+        1
+    } else {
+        current
     }
 }
 
@@ -470,6 +479,7 @@ impl CliCommand {
             pending_read: None,
             last_notification_instant: None,
             next_reconciliation_at: Instant::now(),
+            had_successful_read: false,
         })
     }
 }
@@ -559,6 +569,7 @@ struct Connection {
     pending_read: Option<PendingRead>,
     last_notification_instant: Option<Instant>,
     next_reconciliation_at: Instant,
+    had_successful_read: bool,
 }
 
 impl Connection {
@@ -815,6 +826,7 @@ fn run_connected(
                 "online",
                 "Límites recibidos desde Codex.",
             );
+            connection.had_successful_read = true;
         }
 
         let reconciliation_due = should_reconcile_limits(
@@ -879,6 +891,12 @@ mod tests {
         assert_eq!(next_backoff(10), 30);
         assert_eq!(next_backoff(30), 60);
         assert_eq!(next_backoff(60), 60);
+    }
+
+    #[test]
+    fn backoff_resets_only_after_a_successful_read() {
+        assert_eq!(retry_delay_after_connection(30, false), 30);
+        assert_eq!(retry_delay_after_connection(30, true), 1);
     }
 
     #[test]
