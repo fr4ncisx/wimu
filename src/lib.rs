@@ -268,7 +268,16 @@ struct SettingsFileLock(Arc<Mutex<()>>);
 #[derive(Clone)]
 struct WindowModeTracker(Arc<Mutex<WindowModeSnapshot>>);
 
-struct PanelReadyState(AtomicBool);
+const STARTUP_READINESS_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct PanelReadyState {
+    ready: AtomicBool,
+    started_at: Instant,
+}
+
+fn should_show_panel(ready: bool, elapsed: Duration) -> bool {
+    ready || elapsed >= STARTUP_READINESS_TIMEOUT
+}
 
 #[derive(Clone)]
 struct WindowGeometrySaveChannel(mpsc::Sender<WindowGeometrySaveRequest>);
@@ -692,7 +701,7 @@ fn get_native_window_mode(tracker: State<'_, WindowModeTracker>) -> Result<bool,
 #[tauri::command]
 fn show_main_panel(app: AppHandle) -> Result<(), String> {
     if let Some(ready) = app.try_state::<PanelReadyState>() {
-        ready.0.store(true, Ordering::Release);
+        ready.ready.store(true, Ordering::Release);
     }
     let window = app
         .get_webview_window("main")
@@ -740,10 +749,12 @@ fn settings_path(app: &AppHandle) -> tauri::Result<PathBuf> {
 }
 
 fn show_panel(app: &AppHandle) {
-    if app
-        .try_state::<PanelReadyState>()
-        .is_some_and(|ready| !ready.0.load(Ordering::Acquire))
-    {
+    if app.try_state::<PanelReadyState>().is_some_and(|ready| {
+        !should_show_panel(
+            ready.ready.load(Ordering::Acquire),
+            ready.started_at.elapsed(),
+        )
+    }) {
         return;
     }
     if let Some(window) = app.get_webview_window("main") {
@@ -1171,10 +1182,12 @@ fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 }
 
 fn request_close_confirmation(app: &AppHandle) {
-    if app
-        .try_state::<PanelReadyState>()
-        .is_some_and(|ready| !ready.0.load(Ordering::Acquire))
-    {
+    if app.try_state::<PanelReadyState>().is_some_and(|ready| {
+        !should_show_panel(
+            ready.ready.load(Ordering::Acquire),
+            ready.started_at.elapsed(),
+        )
+    }) {
         return;
     }
     if let Some(window) = app.get_webview_window("main") {
@@ -1299,7 +1312,28 @@ pub fn run() {
                 settings_height: None,
             })));
             app.manage(window_mode_tracker.clone());
-            app.manage(PanelReadyState(AtomicBool::new(false)));
+            app.manage(PanelReadyState {
+                ready: AtomicBool::new(false),
+                started_at: Instant::now(),
+            });
+            let watchdog_app = app.handle().clone();
+            thread::Builder::new()
+                .name("panel-readiness-watchdog".into())
+                .spawn(move || {
+                    thread::sleep(STARTUP_READINESS_TIMEOUT);
+                    if let Some(ready) = watchdog_app.try_state::<PanelReadyState>() {
+                        if !ready.ready.load(Ordering::Acquire) {
+                            ready.ready.store(true, Ordering::Release);
+                            let runner = watchdog_app.clone();
+                            let _ = watchdog_app.run_on_main_thread(move || {
+                                if let Some(window) = runner.get_webview_window("main") {
+                                    let _ = window.show();
+                                }
+                            });
+                        }
+                    }
+                })
+                .map_err(std::io::Error::other)?;
             let (window_geometry_tx, window_geometry_rx) = mpsc::channel();
             start_window_geometry_writer(
                 app.handle().clone(),
@@ -2053,5 +2087,14 @@ mod tests {
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn shows_panel_after_frontend_timeout() {
+        assert!(!should_show_panel(false, Duration::from_secs(0)));
+        assert!(!should_show_panel(false, Duration::from_secs(4)));
+        assert!(should_show_panel(false, Duration::from_secs(5)));
+        assert!(should_show_panel(false, Duration::from_secs(10)));
+        assert!(should_show_panel(true, Duration::from_secs(0)));
     }
 }

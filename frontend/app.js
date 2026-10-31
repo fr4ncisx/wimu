@@ -1052,4 +1052,9 @@ async function initialize() {
 
 applyLocalization();
 render();
-initialize();
+initialize().catch(async () => {
+  windowModeError = true;
+  setPanelVisible(true);
+  render();
+  try { await invoke("show_main_panel"); } catch {}
+});

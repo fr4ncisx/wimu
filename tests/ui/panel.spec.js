@@ -1390,3 +1390,22 @@ test("restoring the main panel resynchronizes usage without removing its control
   for (const name of ["Settings", "Minimize", "Close", "Turn on ultra-compact mode"]) await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
   await expect(page.locator("[data-resize-direction]")).toHaveCount(2);
 });
+
+test("shows panel when initialize rejects", async ({ page }) => {
+  await page.addInitScript(() => {
+    let armed = false;
+    window.addEventListener("DOMContentLoaded", () => {
+      armed = true;
+    });
+    const originalSetAttribute = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function (name, value) {
+      if (armed && this.id === "general-tab" && name === "aria-selected") {
+        throw new Error("Simulated initialize failure");
+      }
+      return originalSetAttribute.call(this, name, value);
+    };
+  });
+  await installTauriMock(page);
+  await page.waitForFunction(() => window.__mockPanelShown);
+  await expect(page.locator(".app-shell")).toBeVisible();
+});
