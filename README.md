@@ -105,9 +105,9 @@ These tools are only needed for frontend UI tests; they are not required to buil
 
 ## How updates work
 
-WIMU reads limits from Codex CLI over local standard input and output and validates the `app-server` protocol instead of requiring an exact CLI version. It applies limit-change events as they arrive and reconciles the values every 15 seconds while connected. If a connection is lost, the panel marks the data stale and reconnects. Event delivery has no documented maximum latency.
+WIMU reads limits from Codex CLI over local standard input and output and validates the `app-server` protocol instead of requiring an exact CLI version. It applies limit-change events as they arrive, coalesces concurrent read requests, and reconciles the values every 15 seconds while connected. If a connection is lost, the panel marks the data stale and reconnects with exponential backoff that resets only after a verified successful read. Event delivery has no documented maximum latency.
 
-The app identifies the five-hour and weekly windows from their durations and uses the percentage and reset time returned by Codex. It preserves the source percentage precision and does not estimate a missing window. If Codex CLI is missing, install it and restart WIMU.
+The app identifies the five-hour and weekly windows from their durations, giving precedence to the primary `codex` bucket when duplicate durations occur, and uses the percentage and reset time returned by Codex. It preserves the source percentage precision and does not estimate a missing window. If Codex CLI is missing, install it and restart WIMU.
 
 ---
 
@@ -120,6 +120,8 @@ The app identifies the five-hour and weekly windows from their durations and use
 | No usage is available | Sign in through Codex CLI under the same Windows account, then restart the app. |
 | Data is stale | Restore Codex CLI availability; the app reconnects when the connection returns. |
 | A usage window is unavailable | Check that Codex returned that period. The app does not estimate missing data. |
+| Settings file is corrupt | WIMU backs up the damaged file to `settings.json.corrupt` and restores safe defaults automatically. |
+| Startup or connection issues | Inspect diagnostic messages on standard error (`[WIMU] ...`); child process stderr is captured and sensitive tokens are automatically redacted. |
 | `cargo tauri` is not recognized | Install the pinned Tauri CLI command above, then reopen PowerShell. |
 
 ---
@@ -134,7 +136,7 @@ WIMU does not prompt for, copy, or store passwords or tokens. Its local `setting
 
 ## Releases
 
-CI validates version metadata, Rust formatting and tests, JavaScript syntax, Playwright UI tests, and the Windows build on pull requests and pushes to `main`. CI and release builds cache Tauri CLI `2.12.2`, Cargo dependencies, and Rust build outputs; CI also caches npm downloads. The first successful run populates the caches.
+CI validates version metadata, Rust formatting and tests, JavaScript syntax, Playwright UI tests, and the Windows build on pull requests and pushes to `main`. The release workflow enforces the same test suite before drafting release assets and supports manual dry-run runs via `workflow_dispatch`. CI and release builds cache Tauri CLI `2.12.2`, Cargo dependencies, and Rust build outputs; CI also caches npm downloads. The first successful run populates the caches.
 
 After CI passes for the intended commit, push an annotated version tag that matches `Cargo.toml` and `tauri.conf.json` to start the Windows release workflow. It creates a draft containing the executable and its SHA-256 checksum; a maintainer reviews and publishes the draft manually.
 
