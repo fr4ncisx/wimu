@@ -107,7 +107,7 @@ These tools are only needed for frontend UI tests; they are not required to buil
 
 WIMU reads limits from Codex CLI over local standard input and output and validates the `app-server` protocol instead of requiring an exact CLI version. It applies limit-change events as they arrive, coalesces concurrent read requests, and reconciles the values every 15 seconds while connected. If a connection is lost, the panel marks the data stale and reconnects with exponential backoff that resets only after a verified successful read. Event delivery has no documented maximum latency.
 
-The app identifies the five-hour and weekly windows from their durations, giving precedence to the primary `codex` bucket when duplicate durations occur, and uses the percentage and reset time returned by Codex. It preserves the source percentage precision and does not estimate a missing window. If Codex CLI is missing, install it and restart WIMU.
+The app identifies the five-hour and weekly windows from their durations, giving precedence to the primary `codex` bucket when duplicate durations occur, respects ordinary usage permission so that active quota is never prematurely reported as exhausted, and uses the percentage and reset time returned by Codex. Tray indicators preserve non-zero remaining values so that 0% strictly represents complete quota exhaustion. It preserves the source percentage precision and does not estimate a missing window. If Codex CLI is missing, install it and restart WIMU.
 
 ---
 
