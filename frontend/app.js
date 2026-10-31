@@ -143,7 +143,6 @@ const translations = {
 const initialSettings = {
   threshold5h: 20,
   thresholdWeekly: 20,
-  uiScale: 100,
   alwaysOnTop: true,
   soundEnabled: false,
   closeAction: "ask",
@@ -346,9 +345,8 @@ function renderQuota(card, percentNode, meter, resetNode, windowData, threshold)
     return;
   }
 
-  const remaining = Number(windowData.remainingFraction) * 100;
   const remainingLabel = Number(windowData.remainingPercent);
-  if (!Number.isFinite(remaining) || !Number.isFinite(remainingLabel)) {
+  if (!Number.isFinite(remainingLabel)) {
     card.classList.add("quota--unavailable");
     percentNode.textContent = "—";
     setQuotaHeat(card, meter, "unavailable");
@@ -455,7 +453,6 @@ function setSaveMessage(messageKey, isError = false) {
 function settingsMatch(left, right) {
   return left.threshold5h === right.threshold5h
     && left.thresholdWeekly === right.thresholdWeekly
-    && left.uiScale === right.uiScale
     && left.alwaysOnTop === right.alwaysOnTop
     && left.soundEnabled === right.soundEnabled
     && left.closeAction === right.closeAction
@@ -909,7 +906,6 @@ async function quitApplication() {
   try {
     await invoke("quit_app");
   } catch {
-    // The backend owns shutdown; there is no safe frontend-only exit path.
   }
 }
 

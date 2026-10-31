@@ -17,28 +17,39 @@ const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const RPC_TIMEOUT: Duration = Duration::from_secs(12);
 const RATE_LIMITS_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(15);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UsageStatus {
+    Connecting,
+    Refreshing,
+    Reconnecting,
+    Stale,
+    Disconnected,
+    NeedsLogin,
+    CliMissing,
+    CliCheckFailed,
+    Incompatible,
+    Online,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageState {
     pub revision: u64,
-    pub status: String,
-    pub message: String,
+    pub status: UsageStatus,
     pub five_hour: Option<crate::protocol::UsageWindow>,
     pub weekly: Option<crate::protocol::UsageWindow>,
     pub last_updated_at: Option<u64>,
-    pub last_notification_at: Option<u64>,
 }
 
 impl Default for UsageState {
     fn default() -> Self {
         Self {
             revision: 0,
-            status: "connecting".into(),
-            message: "Conectando con Codex…".into(),
+            status: UsageStatus::Connecting,
             five_hour: None,
             weekly: None,
             last_updated_at: None,
-            last_notification_at: None,
         }
     }
 }
@@ -58,11 +69,6 @@ impl UsageState {
         self.five_hour = None;
         self.weekly = None;
         self.last_updated_at = None;
-    }
-
-    fn status(&mut self, status: &str, message: &str) {
-        self.status = status.to_owned();
-        self.message = message.to_owned();
     }
 }
 
@@ -134,18 +140,8 @@ fn resolve_cli(
 
 fn report_cli_failure(app: &AppHandle, state: &Arc<Mutex<UsageState>>, failure: CliCheckFailure) {
     match failure {
-        CliCheckFailure::Missing => update_status(
-            app,
-            state,
-            "cliMissing",
-            "No se encontró Codex CLI. Instalalo y reiniciá la aplicación para consultar los límites.",
-        ),
-        CliCheckFailure::CheckFailed => update_status(
-            app,
-            state,
-            "cliCheckFailed",
-            "No se pudo comprobar Codex CLI. WIMU reintentará automáticamente.",
-        ),
+        CliCheckFailure::Missing => update_status(app, state, UsageStatus::CliMissing),
+        CliCheckFailure::CheckFailed => update_status(app, state, UsageStatus::CliCheckFailed),
     }
 }
 
@@ -186,8 +182,8 @@ fn supervise(app: AppHandle, commands: Receiver<BackendCommand>, state: Arc<Mute
 
         match initialize(&mut connection, &commands) {
             Ok(()) => match run_connected(&app, &commands, &state, &mut connection) {
-                LoopResult::Incompatible(message) => {
-                    update_status(&app, &state, "incompatible", &message);
+                LoopResult::Incompatible(_message) => {
+                    update_status(&app, &state, UsageStatus::Incompatible);
                     terminate_child(&mut connection.child);
                     break;
                 }
@@ -202,8 +198,8 @@ fn supervise(app: AppHandle, commands: Receiver<BackendCommand>, state: Arc<Mute
                         retry_delay_after_connection(retry_seconds, connection.had_successful_read);
                 }
             },
-            Err(ConnectFailure::Incompatible(message)) => {
-                update_status(&app, &state, "incompatible", &message);
+            Err(ConnectFailure::Incompatible(_message)) => {
+                update_status(&app, &state, UsageStatus::Incompatible);
                 terminate_child(&mut connection.child);
                 break;
             }
@@ -270,27 +266,18 @@ fn mark_disconnected(app: &AppHandle, state: &Arc<Mutex<UsageState>>) {
 
 fn mark_disconnected_snapshot(snapshot: &mut UsageState) {
     if snapshot.has_data() {
-        snapshot.status(
-            "stale",
-            "Conexión perdida. El dato anterior está desactualizado.",
-        );
+        snapshot.status = UsageStatus::Stale;
     } else {
-        snapshot.status(
-            "disconnected",
-            "No se pudo conectar con Codex. Se reintentará.",
-        );
+        snapshot.status = UsageStatus::Disconnected;
     }
 }
 
 fn set_connecting_status(app: &AppHandle, state: &Arc<Mutex<UsageState>>) {
     if let Ok(mut snapshot) = state.lock() {
         if snapshot.has_data() {
-            snapshot.status(
-                "reconnecting",
-                "Reconectando con Codex. El dato anterior está desactualizado.",
-            );
+            snapshot.status = UsageStatus::Reconnecting;
         } else {
-            snapshot.status("connecting", "Conectando con Codex…");
+            snapshot.status = UsageStatus::Connecting;
         }
     }
     publish(app, state);
@@ -332,37 +319,29 @@ fn parse_server_line(line: &str) -> Result<Value, ()> {
     serde_json::from_str(line).map_err(|_| ())
 }
 
-/// Applies only values carried by the notification. A partial event clears
-/// missing windows and asks the caller to fetch a complete snapshot.
 fn apply_rate_notification(
     snapshot: &mut UsageState,
     params: Option<&Value>,
     received_at: u64,
 ) -> bool {
-    snapshot.last_notification_at = Some(received_at);
     let Some(windows) = params.and_then(parse_rate_limits) else {
-        // Do not keep rendering a previous snapshot as if this notification
-        // had refreshed it. The follow-up read will repopulate both windows.
         snapshot.clear_windows();
-        snapshot.status("refreshing", "Actualizando desde Codex…");
+        snapshot.status = UsageStatus::Refreshing;
         return true;
     };
     let complete = windows.is_complete();
     snapshot.set_windows(windows, received_at);
     if complete {
-        snapshot.status("online", "Actualizado por un evento de Codex.");
+        snapshot.status = UsageStatus::Online;
     } else {
-        snapshot.status(
-            "refreshing",
-            "Llegó un cambio parcial; completando la lectura…",
-        );
+        snapshot.status = UsageStatus::Refreshing;
     }
     !complete
 }
 
-fn update_status(app: &AppHandle, state: &Arc<Mutex<UsageState>>, status: &str, message: &str) {
+fn update_status(app: &AppHandle, state: &Arc<Mutex<UsageState>>, status: UsageStatus) {
     if let Ok(mut snapshot) = state.lock() {
-        snapshot.status(status, message);
+        snapshot.status = status;
     }
     publish(app, state);
 }
@@ -384,12 +363,11 @@ fn apply_windows(
     state: &Arc<Mutex<UsageState>>,
     windows: UsageWindows,
     received_at: u64,
-    status: &str,
-    message: &str,
+    status: UsageStatus,
 ) {
     if let Ok(mut snapshot) = state.lock() {
         snapshot.set_windows(windows, received_at);
-        snapshot.status(status, message);
+        snapshot.status = status;
     }
     publish(app, state);
 }
@@ -480,7 +458,7 @@ impl CliCommand {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            command.creation_flags(0x0800_0000);
         }
         command
     }
@@ -758,12 +736,7 @@ fn run_connected(
     state: &Arc<Mutex<UsageState>>,
     connection: &mut Connection,
 ) -> LoopResult {
-    update_status(
-        app,
-        state,
-        "refreshing",
-        "Consultando los límites de Codex…",
-    );
+    update_status(app, state, UsageStatus::Refreshing);
     if connection.request_read().is_err() {
         return LoopResult::Disconnected;
     }
@@ -852,12 +825,9 @@ fn run_connected(
                             "La CLI no admite account/rateLimits/read.".into(),
                         )
                     }
-                    ReadErrorDisposition::NeedsLogin => update_status(
-                        app,
-                        state,
-                        "needsLogin",
-                        "No se pudieron leer los límites. Revisá tu sesión de Codex y volvé a intentar.",
-                    ),
+                    ReadErrorDisposition::NeedsLogin => {
+                        update_status(app, state, UsageStatus::NeedsLogin);
+                    }
                     ReadErrorDisposition::Transient => return LoopResult::Disconnected,
                 }
                 continue;
@@ -867,8 +837,6 @@ fn run_connected(
                 .last_notification_instant
                 .is_some_and(|event_at| event_at > read_started_at)
             {
-                // A newer event arrived after this read began; do not let its
-                // older response replace the event-driven value.
                 continue;
             }
 
@@ -882,14 +850,7 @@ fn run_connected(
                     "La respuesta de límites de Codex no contiene ventanas reconocibles.".into(),
                 );
             };
-            apply_windows(
-                app,
-                state,
-                windows,
-                epoch_ms(),
-                "online",
-                "Límites recibidos desde Codex.",
-            );
+            apply_windows(app, state, windows, epoch_ms(), UsageStatus::Online);
             connection.had_successful_read = true;
         }
 
@@ -1105,42 +1066,35 @@ mod tests {
     fn disconnected_state_marks_cached_values_stale() {
         let mut state = UsageState {
             revision: 0,
-            status: "online".into(),
-            message: "ok".into(),
+            status: UsageStatus::Online,
             five_hour: None,
             weekly: None,
             last_updated_at: Some(1),
-            last_notification_at: None,
         };
         mark_disconnected_snapshot(&mut state);
-        assert_eq!(state.status, "stale");
+        assert_eq!(state.status, UsageStatus::Stale);
     }
 
     #[test]
     fn first_disconnect_without_any_read_is_not_reported_as_stale_data() {
         let mut state = UsageState::default();
         mark_disconnected_snapshot(&mut state);
-        assert_eq!(state.status, "disconnected");
+        assert_eq!(state.status, UsageStatus::Disconnected);
     }
 
     #[test]
     fn connecting_after_a_previous_read_is_marked_stale() {
         let mut state = UsageState {
             revision: 0,
-            status: "online".into(),
-            message: "ok".into(),
+            status: UsageStatus::Online,
             five_hour: None,
             weekly: None,
             last_updated_at: Some(1),
-            last_notification_at: None,
         };
         if state.has_data() {
-            state.status(
-                "reconnecting",
-                "Reconectando con Codex. El dato anterior está desactualizado.",
-            );
+            state.status = UsageStatus::Reconnecting;
         }
-        assert_eq!(state.status, "reconnecting");
+        assert_eq!(state.status, UsageStatus::Reconnecting);
         assert_eq!(state.last_updated_at, Some(1));
     }
 
@@ -1152,44 +1106,38 @@ mod tests {
         });
         let should_read = apply_rate_notification(&mut state, Some(&payload), 1000);
         assert!(should_read);
-        assert_eq!(state.status, "refreshing");
+        assert_eq!(state.status, UsageStatus::Refreshing);
         assert_eq!(state.five_hour.unwrap().remaining_percent, "87.5");
         assert!(state.weekly.is_none());
-        assert_eq!(state.last_notification_at, Some(1000));
     }
 
     #[test]
     fn malformed_notification_clears_cached_windows_until_full_read_succeeds() {
         let mut state = UsageState {
             revision: 0,
-            status: "online".into(),
-            message: "ok".into(),
+            status: UsageStatus::Online,
             five_hour: Some(crate::protocol::UsageWindow {
                 window_duration_mins: 300,
                 used_percent: "39".into(),
                 remaining_percent: "61".into(),
-                remaining_fraction: 0.61,
                 resets_at: 1_792_000_000,
             }),
             weekly: Some(crate::protocol::UsageWindow {
                 window_duration_mins: 10_080,
                 used_percent: "31".into(),
                 remaining_percent: "69".into(),
-                remaining_fraction: 0.69,
                 resets_at: 1_792_000_000,
             }),
             last_updated_at: Some(1_000),
-            last_notification_at: None,
         };
 
         let should_read = apply_rate_notification(&mut state, None, 2_000);
 
         assert!(should_read);
-        assert_eq!(state.status, "refreshing");
+        assert_eq!(state.status, UsageStatus::Refreshing);
         assert_eq!(state.five_hour, None);
         assert_eq!(state.weekly, None);
         assert_eq!(state.last_updated_at, None);
-        assert_eq!(state.last_notification_at, Some(2_000));
     }
 
     #[test]
@@ -1202,7 +1150,7 @@ mod tests {
             }
         });
         assert!(!apply_rate_notification(&mut state, Some(&payload), 2000));
-        assert_eq!(state.status, "online");
+        assert_eq!(state.status, UsageStatus::Online);
         assert!(state.five_hour.is_some());
         assert!(state.weekly.is_some());
     }

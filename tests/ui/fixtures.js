@@ -38,7 +38,6 @@ const test = base.extend({
 
 function quota(remaining, windowDurationMins) {
   return {
-    remainingFraction: remaining / 100,
     remainingPercent: String(remaining),
     resetsAt: 1_792_000_000,
     windowDurationMins,
@@ -70,7 +69,6 @@ async function installTauriMock(page, options = {}, route = "/") {
     const defaults = {
       threshold5h: 20,
       thresholdWeekly: 20,
-      uiScale: 100,
       alwaysOnTop: true,
       closeAction: "ask",
       language: "en",
@@ -97,14 +95,12 @@ async function installTauriMock(page, options = {}, route = "/") {
         windowDurationMins: 300,
         usedPercent: "28",
         remainingPercent: "72",
-        remainingFraction: 0.72,
         resetsAt: 1_792_000_000,
       },
       weekly: {
         windowDurationMins: 10_080,
         usedPercent: "36",
         remainingPercent: "64",
-        remainingFraction: 0.64,
         resetsAt: 1_792_000_000,
       },
     };

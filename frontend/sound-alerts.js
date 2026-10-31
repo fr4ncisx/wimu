@@ -12,10 +12,8 @@
   function validWindow(windowData) {
     if (!windowData || typeof windowData !== "object") return null;
     const remaining = Number(windowData.remainingPercent);
-    const fraction = Number(windowData.remainingFraction);
     const resetsAt = Number(windowData.resetsAt);
     if (!Number.isFinite(remaining) || remaining < 0 || remaining > 100
-      || !Number.isFinite(fraction) || fraction < 0 || fraction > 1
       || !Number.isSafeInteger(resetsAt) || resetsAt <= 0) return null;
     return { remaining, resetsAt };
   }

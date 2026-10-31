@@ -10,7 +10,6 @@ pub struct UsageWindow {
     pub window_duration_mins: u32,
     pub used_percent: String,
     pub remaining_percent: String,
-    pub remaining_fraction: f64,
     pub resets_at: u64,
 }
 
@@ -103,7 +102,6 @@ fn parse_window(value: &Value) -> Option<UsageWindow> {
     let used_raw = used_number.to_string();
     let remaining = subtract_from_100(&used_raw)?;
     let used_float = used_number.as_f64()?;
-    let remaining_fraction = remaining.parse::<f64>().ok()? / 100.0;
     if !used_float.is_finite() || !(0.0..=100.0).contains(&used_float) {
         return None;
     }
@@ -116,13 +114,10 @@ fn parse_window(value: &Value) -> Option<UsageWindow> {
         window_duration_mins: duration,
         used_percent: used_raw,
         remaining_percent: remaining,
-        remaining_fraction,
         resets_at,
     })
 }
 
-/// Computes `100 - value` from the JSON number's decimal spelling so the UI
-/// retains the source precision without binary floating point artifacts.
 fn subtract_from_100(value: &str) -> Option<String> {
     const MAX_SCALE: usize = 28;
 

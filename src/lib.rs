@@ -243,9 +243,7 @@ pub struct Settings {
     pub language: Language,
     #[serde(default)]
     pub sound_enabled: bool,
-    // Kept so settings files from older versions remain readable.
-    #[serde(default = "default_ui_scale")]
-    pub ui_scale: u16,
+
     #[serde(default = "default_always_on_top")]
     pub always_on_top: bool,
     #[serde(default = "default_close_action")]
@@ -314,10 +312,6 @@ impl WindowGeometrySaveRequest {
     }
 }
 
-fn default_ui_scale() -> u16 {
-    100
-}
-
 fn default_always_on_top() -> bool {
     true
 }
@@ -333,7 +327,6 @@ impl Default for Settings {
             threshold_weekly: 20.0,
             language: Language::En,
             sound_enabled: false,
-            ui_scale: default_ui_scale(),
             always_on_top: default_always_on_top(),
             close_action: default_close_action(),
             ultra_compact: false,
@@ -352,8 +345,6 @@ impl Settings {
             && (0.0..=100.0).contains(&self.threshold_weekly)
             && self.threshold_5h.fract() == 0.0
             && self.threshold_weekly.fract() == 0.0
-            && (80..=150).contains(&self.ui_scale)
-            && self.ui_scale % 10 == 0
             && self.window_position.map_or(true, WindowPosition::is_valid)
     }
 }
@@ -408,6 +399,9 @@ fn save_settings(app: AppHandle, settings: serde_json::Value) -> Result<Settings
         {
             return Err("Invalid preference field".into());
         }
+        if key == "uiScale" {
+            continue;
+        }
         merged[key] = value.clone();
     }
     let settings: Settings =
@@ -447,9 +441,7 @@ fn decode_settings(value: serde_json::Value) -> Result<Settings, String> {
             "threshold5h" | "thresholdWeekly" => value
                 .as_f64()
                 .is_some_and(|n| n.is_finite() && (0.0..=100.0).contains(&n)),
-            "uiScale" => value
-                .as_u64()
-                .is_some_and(|n| (80..=150).contains(&n) && n % 10 == 0),
+            "uiScale" => false,
             "language" => matches!(value.as_str(), Some("en" | "es")),
             "soundEnabled" => value.is_boolean(),
             "closeAction" => matches!(value.as_str(), Some("ask" | "minimize" | "quit")),
@@ -1288,7 +1280,10 @@ pub(crate) fn update_tray_indicators(app: &AppHandle, state: &UsageState) {
             return;
         }
         let settings = read_settings_file(&indicator_app);
-        let is_fresh = matches!(snapshot.status.as_str(), "online" | "refreshing");
+        let is_fresh = matches!(
+            snapshot.status,
+            backend::UsageStatus::Online | backend::UsageStatus::Refreshing
+        );
         for (id, is_weekly, window) in [
             ("five-hour", false, snapshot.five_hour.as_ref()),
             ("weekly", true, snapshot.weekly.as_ref()),
@@ -1526,14 +1521,12 @@ mod tests {
         let defaults = Settings::default();
         assert_eq!(defaults.threshold_5h, 20.0);
         assert_eq!(defaults.threshold_weekly, 20.0);
-        assert_eq!(defaults.ui_scale, 100);
         assert!(defaults.is_valid());
         assert!(!Settings {
             threshold_5h: 100.1,
             threshold_weekly: 20.0,
             language: Language::En,
             sound_enabled: false,
-            ui_scale: 100,
             always_on_top: true,
             close_action: CloseAction::Ask,
             ultra_compact: false,
@@ -1547,21 +1540,6 @@ mod tests {
             threshold_weekly: 20.0,
             language: Language::En,
             sound_enabled: false,
-            ui_scale: 100,
-            always_on_top: true,
-            close_action: CloseAction::Ask,
-            ultra_compact: false,
-            normal_window_size: default_normal_window_size(),
-            ultra_compact_window_size: default_ultra_compact_window_size(),
-            window_position: None,
-        }
-        .is_valid());
-        assert!(!Settings {
-            threshold_5h: 20.0,
-            threshold_weekly: 20.0,
-            language: Language::En,
-            sound_enabled: false,
-            ui_scale: 105,
             always_on_top: true,
             close_action: CloseAction::Ask,
             ultra_compact: false,
@@ -1582,7 +1560,6 @@ mod tests {
                 "thresholdWeekly": 20.0,
                 "language": "en",
                 "soundEnabled": false,
-                "uiScale": 100,
                 "alwaysOnTop": true,
                 "closeAction": "ask",
                 "ultraCompact": false,
@@ -1593,7 +1570,6 @@ mod tests {
         );
         let decoded: Settings = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.threshold_5h, 20.0);
-        assert_eq!(decoded.ui_scale, 100);
         assert_eq!(decoded.language, Language::En);
         assert!(!decoded.sound_enabled);
         assert!(decoded.always_on_top);
@@ -1615,7 +1591,6 @@ mod tests {
         let decoded: Settings = serde_json::from_value(old_settings).unwrap();
         assert_eq!(decoded.threshold_5h, 15.5);
         assert_eq!(decoded.threshold_weekly, 8.0);
-        assert_eq!(decoded.ui_scale, 100);
         assert!(decoded.always_on_top);
         assert_eq!(decoded.language, Language::En);
         assert!(!decoded.sound_enabled);
@@ -2100,7 +2075,6 @@ mod tests {
         assert!(matches!(settings.close_action, CloseAction::Minimize));
         assert!(settings.ultra_compact);
         assert_eq!(settings.threshold_5h, 17.0);
-        assert_eq!(settings.ui_scale, 100);
         assert!(!settings.sound_enabled);
     }
 

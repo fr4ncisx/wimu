@@ -376,7 +376,6 @@ test("captures deterministic normal and ultracompact panels", async ({ page }) =
 
 test("uses ten heat color steps at each 10-point boundary", async ({ page }) => {
   await installTauriMock(page, { settings: { threshold5h: 0, thresholdWeekly: 0 } });
-  // Measure the rendered target width, not the intermediate frames of the UI transition.
   await page.addStyleTag({ content: ".meter-fill { transition: none !important; }" });
   const palette = {
     "step-0": ["#873641", "#d35760", "#f49a91"],
@@ -414,14 +413,12 @@ test("uses ten heat color steps at each 10-point boundary", async ({ page }) => 
           windowDurationMins: 300,
           usedPercent: String(100 - value),
           remainingPercent: String(value),
-          remainingFraction: value / 100,
           resetsAt: 1_792_000_000,
         },
         weekly: {
           windowDurationMins: 10_080,
           usedPercent: String(100 - value),
           remainingPercent: String(value),
-          remainingFraction: value / 100,
           resetsAt: 1_792_000_000,
         },
       }), remaining);
@@ -485,9 +482,7 @@ test("renders quota events immediately, keeps source precision, and recovers fro
   await page.clock.setFixedTime(new Date("2026-10-14T15:00:00.000Z"));
   await installTauriMock(page, {});
   const updated = usageState(3, 82, "online");
-  updated.fiveHour.remainingFraction = 0.03125;
   updated.fiveHour.remainingPercent = "3.125";
-  updated.weekly.remainingFraction = 0.8275;
   updated.weekly.remainingPercent = "82.75";
   await page.evaluate((state) => window.__mockEmitUsage(state), updated);
 
@@ -522,7 +517,6 @@ test("marks missing and malformed windows unavailable without inventing percenta
     status: "online",
     fiveHour: {
       windowDurationMins: 300,
-      remainingFraction: Number.NaN,
       remainingPercent: "not-a-number",
       resetsAt: 0,
     },
@@ -623,13 +617,11 @@ test("plays one reset or threshold sound only for a fresh valid crossing", async
 
   const reset = await page.evaluate(() => {
     const state = structuredClone(window.__mockCurrentUsage);
-    state.fiveHour.remainingFraction = 1;
     state.fiveHour.remainingPercent = "100";
     state.fiveHour.usedPercent = "0";
     const previousReset = state.fiveHour.resetsAt;
     state.lastUpdatedAt = previousReset * 1_000 + 1_000;
     state.fiveHour.resetsAt += 18_000;
-    state.weekly.remainingFraction = 1;
     state.weekly.remainingPercent = "100";
     state.weekly.usedPercent = "0";
     state.weekly.resetsAt += 604_800;
@@ -655,10 +647,8 @@ test("plays one reset or threshold sound only for a fresh valid crossing", async
   const thresholdAfterReset = await page.evaluate(() => {
     const state = structuredClone(window.__mockCurrentUsage);
     state.lastUpdatedAt += 1_000;
-    state.fiveHour.remainingFraction = 0.19;
     state.fiveHour.remainingPercent = "19";
     state.fiveHour.usedPercent = "81";
-    state.weekly.remainingFraction = 0.2;
     state.weekly.remainingPercent = "20";
     state.weekly.usedPercent = "80";
     delete state.revision;
@@ -684,14 +674,12 @@ test("plays one reset or threshold sound only for a fresh valid crossing", async
       windowDurationMins: 300,
       usedPercent: "100",
       remainingPercent: "0",
-      remainingFraction: 0,
       resetsAt: 1_792_000_000,
     };
     state.weekly = {
       windowDurationMins: 10_080,
       usedPercent: "100",
       remainingPercent: "0",
-      remainingFraction: 0,
       resetsAt: 1_792_000_000,
     };
     delete state.revision;
@@ -727,7 +715,6 @@ test("detects each reset boundary once across delayed reconciliation snapshots",
     const state = structuredClone(window.__mockCurrentUsage);
     state.lastUpdatedAt = state.fiveHour.resetsAt * 1_000 + 1_000;
     state.fiveHour.resetsAt += 18_000;
-    state.fiveHour.remainingFraction = 1;
     state.fiveHour.remainingPercent = "100";
     state.fiveHour.usedPercent = "0";
     delete state.revision;
@@ -751,7 +738,6 @@ test("detects each reset boundary once across delayed reconciliation snapshots",
     const state = structuredClone(window.__mockCurrentUsage);
     state.lastUpdatedAt = state.weekly.resetsAt * 1_000 + 1_000;
     state.weekly.resetsAt += 604_800;
-    state.weekly.remainingFraction = 1;
     state.weekly.remainingPercent = "100";
     state.weekly.usedPercent = "0";
     delete state.revision;
@@ -1146,7 +1132,6 @@ test("shows only the fresh window while a partial usage event is being reconcile
       windowDurationMins: 300,
       usedPercent: "69",
       remainingPercent: "31",
-      remainingFraction: 0.31,
       resetsAt: 1_792_000_000,
     },
     weekly: null,
@@ -1441,4 +1426,24 @@ test("malformed palette uses fallback", () => {
   const broken = usagePalette({}, 50, 20);
   expect(Array.isArray(broken.mid)).toBe(true);
   expect(broken.mid).toHaveLength(3);
+});
+
+test("every status has copy", async ({ page }) => {
+  await installTauriMock(page, {});
+  const statuses = [
+    "connecting",
+    "refreshing",
+    "reconnecting",
+    "stale",
+    "disconnected",
+    "needsLogin",
+    "cliMissing",
+    "cliCheckFailed",
+    "incompatible",
+  ];
+  for (const status of statuses) {
+    const text = await page.evaluate((s) => statusCopy(s), status);
+    expect(text).not.toBe("statusDefault");
+    expect(text.length).toBeGreaterThan(0);
+  }
 });
