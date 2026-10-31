@@ -1,6 +1,6 @@
 [package]
 name = "wimu"
-version = "0.5.2"
+version = "0.5.3"
 description = "WIMU desktop panel for Codex CLI usage limits"
 authors = ["WIMU contributors"]
 edition = "2021"
