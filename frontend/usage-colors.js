@@ -1,6 +1,25 @@
 "use strict";
 
+const defaultFallbackPalette = {
+  deep: [40, 44, 52],
+  mid: [105, 107, 116],
+  light: [170, 174, 184],
+};
+
+function isValidSpec(spec) {
+  return Boolean(
+    spec
+      && typeof spec === "object"
+      && Array.isArray(spec.steps)
+      && spec.steps.length === 10
+      && spec.warning
+      && spec.threshold
+      && spec.zero,
+  );
+}
+
 function usagePalette(spec, remaining, threshold) {
+  if (!isValidSpec(spec)) return defaultFallbackPalette;
   const value = Math.max(0, Math.min(100, remaining));
   const limit = Math.max(0, Math.min(100, threshold));
   if (value > limit + 5) return spec.steps[Math.min(9, Math.floor(value / 10))];

@@ -1422,3 +1422,23 @@ test("shared fixtures and app settings match defaults", async ({ page }) => {
   expect(appSettings.normalWindowSize).toEqual({ width: 360, height: 220 });
   expect(appSettings.ultraCompactWindowSize).toEqual({ width: 300, height: 156 });
 });
+
+test("js palette matches shared cases", () => {
+  const spec = require("../../frontend/usage-colors.json");
+  const cases = require("../usage-color-cases.json");
+  const { usagePalette } = require("../../frontend/usage-colors.js");
+  for (const item of cases) {
+    const result = usagePalette(spec, item.remaining, item.threshold);
+    expect(result.mid).toEqual(item.mid);
+  }
+});
+
+test("malformed palette uses fallback", () => {
+  const { usagePalette } = require("../../frontend/usage-colors.js");
+  const fallback = usagePalette(null, 50, 20);
+  expect(Array.isArray(fallback.mid)).toBe(true);
+  expect(fallback.mid).toHaveLength(3);
+  const broken = usagePalette({}, 50, 20);
+  expect(Array.isArray(broken.mid)).toBe(true);
+  expect(broken.mid).toHaveLength(3);
+});
