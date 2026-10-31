@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run verification and build without publishing"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -14,10 +21,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249
 
       - name: Identify Rust compiler
         id: rust-version
@@ -42,7 +49,39 @@ jobs:
           restore-keys: |
             rust-v2-${{ github.repository }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-
 
+      - name: Set up Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Verify version and release notes
+        run: node scripts/verify-release-metadata.mjs
+
+      - name: Install frontend test dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npm run install-browsers
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+      - name: Check frontend JavaScript syntax
+        run: |
+          node --check frontend/app.js
+          node --check frontend/usage-colors.js
+          node --check frontend/sound-alerts.js
+
+      - name: Run Playwright UI tests
+        run: npm test
+
       - name: Verify tag matches the app version
+        if: github.event_name == 'push'
         shell: pwsh
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -99,14 +138,16 @@ jobs:
           }
           New-Item -ItemType Directory -Path "release-assets" | Out-Null
           $productName = (Get-Content -Raw tauri.conf.json | ConvertFrom-Json).productName
-          $executableName = "$productName-$($env:RELEASE_TAG)-windows-x64.exe"
+          $appVersion = (Get-Content -Raw tauri.conf.json | ConvertFrom-Json).version
+          $tag = if ($env:RELEASE_TAG -like 'v*') { $env:RELEASE_TAG } else { "v$appVersion" }
+          $executableName = "$productName-$tag-windows-x64.exe"
           $stagedExecutablePath = Join-Path "release-assets" $executableName
           Copy-Item -LiteralPath $executablePath -Destination $stagedExecutablePath
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedExecutablePath).Hash.ToLowerInvariant()
           "$hash  $executableName" | Set-Content -LiteralPath "$stagedExecutablePath.sha256" -Encoding ascii
 
       - name: Upload release assets
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: windows-release-assets
           path: release-assets/*
@@ -115,16 +156,17 @@ jobs:
 
   draft-release:
     name: Create or update draft release
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
     needs: build
     runs-on: windows-latest
     permissions:
       contents: write
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Download release assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: windows-release-assets
           path: release-assets
@@ -140,7 +182,9 @@ jobs:
           $owner = $repositoryParts[0]
           $repository = $repositoryParts[1]
           $api = "https://api.github.com/repos/$owner/$repository"
-          $releaseNotesPath = Join-Path ".github/release-notes" "$($env:RELEASE_TAG).md"
+          $appVersion = (Get-Content -Raw tauri.conf.json | ConvertFrom-Json).version
+          $tag = if ($env:RELEASE_TAG -like 'v*') { $env:RELEASE_TAG } else { "v$appVersion" }
+          $releaseNotesPath = Join-Path ".github/release-notes" "$tag.md"
           if (-not (Test-Path -LiteralPath $releaseNotesPath -PathType Leaf)) {
             throw "Curated release notes not found: $releaseNotesPath"
           }
@@ -154,7 +198,7 @@ jobs:
 
           $release = $null
           try {
-            $release = Invoke-RestMethod -Method Get -Uri "$api/releases/tags/$($env:RELEASE_TAG)" -Headers $headers
+            $release = Invoke-RestMethod -Method Get -Uri "$api/releases/tags/$tag" -Headers $headers
           } catch {
             if ([int]$_.Exception.Response.StatusCode -ne 404) {
               throw
@@ -163,8 +207,8 @@ jobs:
 
           if ($null -eq $release) {
             $payload = @{
-              tag_name = $env:RELEASE_TAG
-              name = "$productName $($env:RELEASE_TAG)"
+              tag_name = $tag
+              name = "$productName $tag"
               body = $releaseBody
               draft = $true
               prerelease = $false
@@ -172,10 +216,10 @@ jobs:
             } | ConvertTo-Json
             $release = Invoke-RestMethod -Method Post -Uri "$api/releases" -Headers $headers -ContentType "application/json" -Body $payload
           } elseif (-not $release.draft) {
-            throw "Release $($env:RELEASE_TAG) is already published; refusing to replace its assets."
+            throw "Release $tag is already published; refusing to replace its assets."
           } else {
             $payload = @{
-              name = "$productName $($env:RELEASE_TAG)"
+              name = "$productName $tag"
               body = $releaseBody
             } | ConvertTo-Json
             $release = Invoke-RestMethod -Method Patch -Uri "$api/releases/$($release.id)" -Headers $headers -ContentType "application/json" -Body $payload
