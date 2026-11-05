@@ -12,9 +12,18 @@
 A compact Windows panel for Codex CLI's five-hour and weekly usage windows.
 <br>
 
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square)](https://www.microsoft.com/windows) [![Stack: Rust and Tauri](https://img.shields.io/badge/stack-Rust%20%2B%20Tauri-DEA584?style=flat-square)](https://v2.tauri.app/) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](LICENSE)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square)](https://www.microsoft.com/windows) [![Stack: Rust and Tauri](https://img.shields.io/badge/stack-Rust%20%2B%20Tauri-DEA584?style=flat-square)](https://v2.tauri.app/) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](LICENSE) [![Status: Discontinued](https://img.shields.io/badge/status-discontinued-critical?style=flat-square)](https://github.com/fr4ncisx/wimu)
 
 </div>
+
+> [!WARNING]
+> ### Project Status: Discontinued
+>
+> **Active development and maintenance of WIMU have ended.**
+>
+> - **Existing releases**: Standalone binaries (up to [v0.5.3](https://github.com/fr4ncisx/wimu/releases)) remain available and function properly with current Codex CLI versions (verified on `0.166.0`, compatible from `0.162.1+`).
+> - **No future updates**: There will be no further bug fixes, feature additions, or compatibility updates if future Codex CLI releases introduce protocol breaking changes beyond `0.166.0`.
+> - **Forks welcome**: The codebase is preserved for reference under the [Apache-2.0 License](LICENSE). You are welcome and encouraged to fork this repository if you wish to continue development, add features, or adapt it to newer Codex CLI protocols.
 
 ---
 
@@ -144,18 +153,10 @@ After CI passes for the intended commit, push an annotated version tag that matc
 
 ## Feedback
 
-Report bugs and request improvements through [GitHub Issues](https://github.com/fr4ncisx/codex-mystats/issues).
+Active maintenance has ended, so GitHub Issues and Pull Requests are no longer monitored or triaged. However, forks are welcome under the [Apache-2.0 License](LICENSE)—feel free to fork the repository to continue development or adapt it for your own use.
 
 ---
 
 ## Disclaimer
 
 WIMU is an independent project. It is not affiliated with or endorsed by OpenAI.
-
----
-
-<div align="center">
-
-**Include your Windows and Codex CLI versions when reporting an issue.**
-
-</div>
